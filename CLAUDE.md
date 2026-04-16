@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 FFmpegKit is an open-source **Android library** (not an app) wrapping FFmpeg 8.0.1 with Kotlin API and C++ JNI bridge. Published via JitPack for dependency consumption:
 
 ```kotlin
-implementation("com.github.zhouquancheng-dev:FFmpegKit:v1.0.0")
+implementation("com.github.zqcformix:FFmpegKit:v1.0.0")
 ```
 
 ## Build Commands
@@ -47,7 +47,7 @@ ffmpegkit/src/main/
 
 - **Public API**: `FFmpegKit` object — `getVersion()`, `getBuildConfiguration()`, `checkLibassAvailability()`, `isLibassAvailable()`, `printInfo()`
 - **JNI naming**: `Java_io_github_nova_ffmpegkit_FFmpegKit_methodName` (maps to `FFmpegKit` object, not Activity)
-- **maven-publish** plugin configured for JitPack (`groupId: com.github.zhouquancheng-dev`, `artifactId: ffmpegkit`)
+- **maven-publish** plugin configured for JitPack (`groupId: com.github.zqcformix`, `artifactId: ffmpegkit`)
 - **consumer-rules.pro**: keeps `FFmpegKit` class for consuming apps with ProGuard
 
 ### app (Demo Module)
@@ -62,7 +62,7 @@ Sample app demonstrating library usage. Uses `FFmpegKit.xxx()` API calls — no 
 - **Enabled features**: libass, libfreetype, libfribidi, mediacodec, jni
 - **Build chain**: freetype → fribidi → harfbuzz → libass → FFmpeg (see `build_android.sh`)
 - libass and dependencies are statically linked into FFmpeg .so files
-- Prebuilt .so available at [GitHub Releases](https://github.com/zhouquancheng-dev/FFmpegKit/releases)
+- Prebuilt .so available at [GitHub Releases](https://github.com/zqcformix/FFmpegKit/releases)
 - .so files are **committed to repo** and bundled into AAR — users get them automatically via dependency
 
 ## Build Configuration
@@ -76,7 +76,7 @@ Sample app demonstrating library usage. Uses `FFmpegKit.xxx()` API calls — no 
 
 ## Git Workflow
 
-- **Repository**: https://github.com/zhouquancheng-dev/FFmpegKit.git
+- **Repository**: https://github.com/zqcformix/FFmpegKit.git
 - **Branch strategy** (Git Flow):
   - `main` — stable releases, tagged with version (e.g. `v1.0.0`)
   - `develop` — integration branch, all feature PRs merge here

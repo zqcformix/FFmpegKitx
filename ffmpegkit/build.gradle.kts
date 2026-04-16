@@ -63,14 +63,14 @@ afterEvaluate {
             create<MavenPublication>("release") {
                 from(components["release"])
 
-                groupId = "com.github.zhouquancheng-dev"
+                groupId = "com.github.zqcformix"
                 artifactId = "ffmpegkit"
                 version = rootProject.extra["versionName"].toString()
 
                 pom {
                     name.set("FFmpegKit")
                     description.set("Android FFmpeg wrapper library with libass subtitle support")
-                    url.set("https://github.com/zhouquancheng-dev/FFmpegKit")
+                    url.set("https://github.com/zqcformix/FFmpegKit")
 
                     licenses {
                         license {
