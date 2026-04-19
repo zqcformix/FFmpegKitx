@@ -26,7 +26,7 @@ dependencyResolutionManagement {
 
 ```kotlin
 dependencies {
-    implementation("com.github.zqcformix:FFmpegKitx:v1.0.1")
+    implementation("com.github.zqcformix:FFmpegKitx:v1.0.2")
 }
 ```
 
@@ -65,7 +65,7 @@ FFmpegKit.printInfo()               // 输出所有信息到 Logcat（tag: FFmpe
 
 **启用特性**: libass, libfreetype, libfribidi, mediacodec, jni
 
-**支持架构**: arm64-v8a, armeabi-v7a
+**支持架构**: arm64-v8a, armeabi-v7a, x86_64
 
 ## License
 

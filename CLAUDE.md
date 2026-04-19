@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 FFmpegKit is an open-source **Android library** (not an app) wrapping FFmpeg 8.0.1 with Kotlin API and C++ JNI bridge. Published via JitPack for dependency consumption:
 
 ```kotlin
-implementation("com.github.zqcformix:FFmpegKitx:v1.0.1")
+implementation("com.github.zqcformix:FFmpegKitx:v1.0.2")
 ```
 
 ## Build Commands
@@ -42,7 +42,7 @@ ffmpegkit/src/main/
 │   ├── CMakeLists.txt             # CMake config, imports FFmpeg as SHARED IMPORTED
 │   ├── native-lib.cpp             # JNI implementation (maps to FFmpegKit object methods)
 │   └── libav*/libsw*/             # FFmpeg C headers (compile-time only)
-└── jniLibs/{arm64-v8a,armeabi-v7a}/  # FFmpeg .so files (committed, bundled in AAR)
+└── jniLibs/{arm64-v8a,armeabi-v7a,x86_64}/  # FFmpeg .so files (committed, bundled in AAR)
 ```
 
 - **Public API**: `FFmpegKit` object — `getVersion()`, `getBuildConfiguration()`, `checkLibassAvailability()`, `isLibassAvailable()`, `printInfo()`
@@ -57,7 +57,7 @@ Sample app demonstrating library usage. Uses `FFmpegKit.xxx()` API calls — no 
 ## FFmpeg Integration
 
 - **FFmpeg 8.0.1** cross-compiled for Android (NDK r29, API 24)
-- **ABIs**: arm64-v8a, armeabi-v7a
+- **ABIs**: arm64-v8a, armeabi-v7a, x86_64
 - **Libraries**: libavcodec, libavformat, libavfilter, libavutil, libswresample, libswscale
 - **Enabled features**: libass, libfreetype, libfribidi, mediacodec, jni
 - **Build chain**: freetype → fribidi → harfbuzz → libass → FFmpeg (see `build_android.sh`)
