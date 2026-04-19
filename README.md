@@ -26,7 +26,7 @@ dependencyResolutionManagement {
 
 ```kotlin
 dependencies {
-    implementation("com.github.zqcformix:FFmpegKitx:v1.0.0")
+    implementation("com.github.zqcformix:FFmpegKitx:v1.0.1")
 }
 ```
 
