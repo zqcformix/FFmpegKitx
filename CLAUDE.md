@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 FFmpegKit is an open-source **Android library** (not an app) wrapping FFmpeg 8.0.1 with Kotlin API and C++ JNI bridge. Published via JitPack for dependency consumption:
 
 ```kotlin
-implementation("com.github.zqcformix:FFmpegKit:v1.0.0")
+implementation("com.github.zqcformix:FFmpegKitx:v1.0.0")
 ```
 
 ## Build Commands
@@ -62,7 +62,7 @@ Sample app demonstrating library usage. Uses `FFmpegKit.xxx()` API calls — no 
 - **Enabled features**: libass, libfreetype, libfribidi, mediacodec, jni
 - **Build chain**: freetype → fribidi → harfbuzz → libass → FFmpeg (see `build_android.sh`)
 - libass and dependencies are statically linked into FFmpeg .so files
-- Prebuilt .so available at [GitHub Releases](https://github.com/zqcformix/FFmpegKit/releases)
+- Prebuilt .so available at [GitHub Releases](https://github.com/zqcformix/FFmpegKitx/releases)
 - .so files are **committed to repo** and bundled into AAR — users get them automatically via dependency
 
 ## Build Configuration
@@ -76,7 +76,7 @@ Sample app demonstrating library usage. Uses `FFmpegKit.xxx()` API calls — no 
 
 ## Git Workflow
 
-- **Repository**: https://github.com/zqcformix/FFmpegKit.git
+- **Repository**: https://github.com/zqcformix/FFmpegKitx.git
 - **Branch strategy** (Git Flow):
   - `main` — stable releases, tagged with version (e.g. `v1.0.0`)
   - `develop` — integration branch, all feature PRs merge here

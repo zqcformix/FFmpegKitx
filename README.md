@@ -1,7 +1,7 @@
 # FFmpegKit
 
-[![Release](https://img.shields.io/github/v/release/zqcformix/FFmpegKit)](https://github.com/zqcformix/FFmpegKit/releases)
-[![JitPack](https://jitpack.io/v/zqcformix/FFmpegKit.svg)](https://jitpack.io/#zqcformix/FFmpegKit)
+[![Release](https://img.shields.io/github/v/release/zqcformix/FFmpegKitx)](https://github.com/zqcformix/FFmpegKitx/releases)
+[![JitPack](https://jitpack.io/v/zqcformix/FFmpegKitx.svg)](https://jitpack.io/#zqcformix/FFmpegKitx)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Android FFmpeg 8.0.1 封装库，提供 Kotlin API，支持 ASS/SSA 字幕渲染（libass）和 MediaCodec 硬件加速。
@@ -26,7 +26,7 @@ dependencyResolutionManagement {
 
 ```kotlin
 dependencies {
-    implementation("com.github.zqcformix:FFmpegKit:v1.0.0")
+    implementation("com.github.zqcformix:FFmpegKitx:v1.0.0")
 }
 ```
 
