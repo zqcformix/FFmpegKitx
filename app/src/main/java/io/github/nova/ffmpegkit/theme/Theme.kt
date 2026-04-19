@@ -1,6 +1,5 @@
 package io.github.nova.ffmpegkit.theme
 
-import android.app.Activity
 import android.os.Build
 import androidx.annotation.ChecksSdkIntAtLeast
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -11,12 +10,11 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.unit.Dp
 import androidx.core.view.WindowCompat
+import io.github.nova.ffmpegkit.utils.findActivity
 
 private val lightScheme = lightColorScheme(
     primary = primaryLight,
@@ -113,7 +111,8 @@ fun FFmpegKitTheme(
     val view = LocalView.current
     if (!view.isInEditMode) {
         SideEffect {
-            val window = (view.context as Activity).window
+            val activity = view.context.findActivity() ?: return@SideEffect
+            val window = activity.window
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 window.isNavigationBarContrastEnforced = false
             }
@@ -122,25 +121,11 @@ fun FFmpegKitTheme(
         }
     }
 
-    val defaultBackgroundTheme = BackgroundTheme(
-        color = colorScheme.background,
-        tonalElevation = Dp.Unspecified,
-    )
-    val tintTheme = when {
-        !disableDynamicTheming && supportsDynamicTheming() -> TintTheme(colorScheme.primary)
-        else -> TintTheme()
-    }
-
-    CompositionLocalProvider(
-        LocalBackgroundTheme provides defaultBackgroundTheme,
-        LocalTintTheme provides tintTheme
+    MaterialTheme(
+        colorScheme = colorScheme,
+        typography = AppTypography
     ) {
-        MaterialTheme(
-            colorScheme = colorScheme,
-            typography = AppTypography
-        ) {
-            content()
-        }
+        content()
     }
 }
 
