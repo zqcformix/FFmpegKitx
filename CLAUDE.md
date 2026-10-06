@@ -15,6 +15,7 @@ implementation("com.github.zqcformix:FFmpegKitx:v1.0.2")
 ```bash
 ./gradlew assembleDebug           # Build demo app + library
 ./gradlew :ffmpegkit:assembleRelease  # Build library AAR only
+./gradlew :ffmpegkit:verifyNativeAlignment  # Fail if a 64-bit .so in the release AAR is below 16 KB alignment
 ./gradlew test                    # Unit tests
 ./gradlew connectedAndroidTest    # Instrumented tests
 ./gradlew clean
@@ -71,8 +72,8 @@ Sample app demonstrating library usage. Uses `FFmpegKit.xxx()` API calls — no 
 - **Kotlin**: 2.3.10, JVM target 17
 - **SDK**: minSdk 26, targetSdk/compileSdk 36
 - **Version catalog**: `gradle/libs.versions.toml`
-- **Native build**: CMake 3.22.1, C++17
-- **Publishing**: maven-publish plugin + JitPack
+- **Native build**: CMake 3.22.1, C++17, NDK pinned to `28.2.13676358` via `ndkVersion` (must match `jitpack.yml`; unpinned builds fell back to NDK r27 and shipped a 4 KB-aligned JNI lib in v1.0.2)
+- **Publishing**: maven-publish plugin + JitPack; every publish task runs `verifyNativeAlignment` first
 
 ## Git Workflow
 
