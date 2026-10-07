@@ -51,7 +51,7 @@ Google Play 自 2025-11-01 起要求面向 Android 15+ 的新应用和更新支�
 
 处理措施：
 
-- `ffmpegkit/build.gradle.kts` 固定 `ndkVersion = "28.2.13676358"`（NDK r28 起默认 16 KB 对齐），`jitpack.yml` 安装同一版本。修改两者时必须保持一致。
+- `ffmpegkit/build.gradle.kts` 固定 `ndkVersion = "28.2.13676358"`（NDK r28 起默认 16 KB 对齐），AGP 在缺少该 NDK 时自动安装。JitPack 上没有 `sdk-manager` 命令，`jitpack.yml` 原先的安装步骤从未生效；2026-10-08 对提交 `e9826e08f9` 的 JitPack 构建确认 AGP 自动安装了 r28.2，`verifyNativeAlignment` 通过，AAR 中 arm64-v8a、x86_64 的 `libffmpegkit.so` 均为 `0x4000`（clang 19.0.1，r530567e）。
 - `verifyNativeAlignment` 检查 release AAR 中每个 64 位 `.so` 的 LOAD 段对齐，不足 16 KB 时让构建失败，并挂在所有 Maven 发布任务之前。32 位 ABI 不会运行在 16 KB 页设备上，因此不检查。
 - 下一个版本发布后，用 v1.0.2 相同的方式下载 AAR 复查 JNI 库，并在发布说明中提示 v1.0.2 用户升级。
 - APK 侧另用 Build Tools 的 `zipalign -c -P 16 -v 4 <app.apk>` 检查，并在 16 KB 页的模拟器或设备上实际运行。参考：[Android 16 KB 页大小指南](https://developer.android.com/guide/practices/page-sizes)。

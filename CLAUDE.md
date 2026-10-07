@@ -75,7 +75,7 @@ Sample app demonstrating library usage. Uses `FFmpegKit.xxx()` API calls — no 
 - **Kotlin**: 2.4.20, JVM target 17
 - **SDK**: minSdk 26, targetSdk/compileSdk 37
 - **Version catalog**: `gradle/libs.versions.toml`
-- **Native build**: CMake 3.22.1, C++17, NDK pinned to `28.2.13676358` via `ndkVersion` (must match `jitpack.yml`; unpinned builds fell back to NDK r27 and shipped a 4 KB-aligned JNI lib in v1.0.2)
+- **Native build**: CMake 3.22.1, C++17, NDK pinned to `28.2.13676358` via `ndkVersion`, which AGP auto-installs on JitPack too (`sdk-manager` does not exist there; unpinned builds fell back to NDK r27 and shipped a 4 KB-aligned JNI lib in v1.0.2)
 - **Publishing**: maven-publish plugin + JitPack; every publish task runs `verifyNativeAlignment` first
 
 ## Planning Docs (`docs/`, Chinese)
