@@ -80,7 +80,7 @@ Sample app demonstrating library usage. Uses `FFmpegKit.xxx()` API calls — no 
 
 ## Planning Docs (`docs/`, Chinese)
 
-- `ROADMAP.zh-CN.md` — milestones and task status; the single source for what is implemented. Editing APIs (trim/split, `FFmpeg` facade) are **designed but not implemented**
+- `ROADMAP.zh-CN.md` — milestones and task status; the single source for what is implemented. Editing APIs (trim/split, `FFmpeg` facade) are **designed but not implemented**. Its "当前进度与下一步" section says where work stopped and what comes next; read it when starting a session and update it when a task lands or the plan changes
 - `ANDROID_API.zh-CN.md` — M1 editing API design draft; the only place that defines M1 scope and limits
 - `ARCHITECTURE.zh-CN.md` — layering, media semantics, upstream trade-offs
 - `RELEASES.zh-CN.md` — release checklist, platform package plan, 16 KB alignment, licensing
