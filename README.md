@@ -83,4 +83,6 @@ FFmpegKit.printInfo()               // 输出所有信息到 Logcat（tag: FFmpe
 
 ## License
 
-MIT
+本项目的封装代码（Kotlin、JNI、构建脚本）使用 [MIT](LICENSE) 许可。
+
+AAR 内的预编译 FFmpeg 库按 LGPL-2.1-or-later 分发，并静态链接了 libass（ISC）、FreeType（FTL）、FriBidi（LGPL-2.1-or-later）和 HarfBuzz（Old MIT）。这些组件不适用 MIT；发布使用本库的应用时需同时遵守它们的许可，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

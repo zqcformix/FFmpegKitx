@@ -12,7 +12,7 @@ plugins {
 android {
     namespace = "io.github.nova.ffmpegkit"
     compileSdk = rootProject.extra["compileSdk"].toString().toInt()
-    // Keep in sync with jitpack.yml. NDK r28+ links 16 KB-aligned .so by default; r27 produced 4 KB alignment.
+    // AGP installs this NDK on demand, including on JitPack. NDK r28+ links 16 KB-aligned .so by default; r27 produced 4 KB alignment.
     ndkVersion = "28.2.13676358"
 
     defaultConfig {

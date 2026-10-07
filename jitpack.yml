@@ -1,6 +1,6 @@
 jdk:
   - openjdk17
-before_install:
-  - sdk-manager "ndk;28.2.13676358" "cmake;3.22.1"
+# NDK and CMake are installed by AGP from ffmpegkit/build.gradle.kts (ndkVersion, cmake.version);
+# JitPack has no sdk-manager command.
 install:
   - ./gradlew :ffmpegkit:publishToMavenLocal

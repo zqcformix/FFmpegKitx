@@ -61,8 +61,9 @@ Sample app demonstrating library usage. Uses `FFmpegKit.xxx()` API calls — no 
 - **ABIs**: arm64-v8a, armeabi-v7a, x86_64
 - **Libraries**: libavcodec, libavformat, libavfilter, libavutil, libswresample, libswscale
 - **Enabled features**: libass, libfreetype, libfribidi, mediacodec, jni
-- **Build chain**: freetype → fribidi → harfbuzz → libass → FFmpeg (see `build_android.sh`)
+- **Build chain**: freetype → fribidi → harfbuzz → libass → FFmpeg (the `build_android.sh` that produced the .so files is not in this repo)
 - libass and dependencies are statically linked into FFmpeg .so files
+- **Licensing**: root `LICENSE` (MIT) covers only the wrapper code; FFmpeg (LGPL-2.1+), libass 0.17.3, FreeType, FriBidi 1.0.16 and HarfBuzz are listed in `THIRD_PARTY_NOTICES.md` with full texts in `licenses/`. Update both when the prebuilt .so files change
 - Prebuilt .so available at [GitHub Releases](https://github.com/zqcformix/FFmpegKitx/releases)
 - .so files are **committed to repo** and bundled into AAR — users get them automatically via dependency
 
@@ -74,7 +75,7 @@ Sample app demonstrating library usage. Uses `FFmpegKit.xxx()` API calls — no 
 - **Kotlin**: 2.4.20, JVM target 17
 - **SDK**: minSdk 26, targetSdk/compileSdk 37
 - **Version catalog**: `gradle/libs.versions.toml`
-- **Native build**: CMake 3.22.1, C++17, NDK pinned to `28.2.13676358` via `ndkVersion` (must match `jitpack.yml`; unpinned builds fell back to NDK r27 and shipped a 4 KB-aligned JNI lib in v1.0.2)
+- **Native build**: CMake 3.22.1, C++17, NDK pinned to `28.2.13676358` via `ndkVersion`, which AGP auto-installs on JitPack too (`sdk-manager` does not exist there; unpinned builds fell back to NDK r27 and shipped a 4 KB-aligned JNI lib in v1.0.2)
 - **Publishing**: maven-publish plugin + JitPack; every publish task runs `verifyNativeAlignment` first
 
 ## Planning Docs (`docs/`, Chinese)
