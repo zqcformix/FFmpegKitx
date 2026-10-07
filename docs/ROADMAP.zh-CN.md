@@ -19,7 +19,7 @@
 | --- | --- | --- |
 | FFmpeg 信息查询 | 已有 | `FFmpegKit.getVersion()`、`getBuildConfiguration()`、`isLibassAvailable()`、`checkLibassAvailability()`、`printInfo()` |
 | 预编译 FFmpeg 8.0.1 | 已有 | arm64-v8a、armeabi-v7a、x86_64；18 个 `.so` 的 LOAD 段对齐均 ≥ 16 KB |
-| JitPack 发布 | 已有 | 最新 `v1.0.2`，只包含信息查询 API |
+| JitPack 发布 | 已有 | 最新 `v1.0.3`，只包含信息查询 API；全部 64 位 `.so` 满足 16 KB 对齐 |
 | 时间裁剪、分割等编辑能力 | 未实现 | 设计见 [Android 编辑 API 设计](ANDROID_API.zh-CN.md) |
 | 通用 FFmpeg/FFprobe 命令执行 | 未实现 | 存在 `libav*` 库不等于存在可调用的 `ffmpeg main()`，见 6.3 |
 | iOS、HarmonyOS 及其他平台 | 未开始 | 见第四、五卷 |

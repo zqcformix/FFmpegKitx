@@ -26,7 +26,7 @@ dependencyResolutionManagement {
 
 ```kotlin
 dependencies {
-    implementation("com.github.zqcformix:FFmpegKitx:v1.0.2")
+    implementation("com.github.zqcformix:FFmpegKitx:v1.0.3")
 }
 ```
 
@@ -44,7 +44,7 @@ android {
 }
 ```
 
-> **16 KB 页大小**：`v1.0.2` 中的 JNI 库 `libffmpegkit.so` 只有 4 KB 对齐，不满足 Google Play 对面向 Android 15+ 应用的 16 KB 要求（FFmpeg 的 `.so` 已达标）。修复已在源码中完成，将随下一个版本发布。
+> **16 KB 页大小**：从 `v1.0.3` 起，AAR 中所有 64 位 `.so` 都满足 Google Play 对面向 Android 15+ 应用的 16 KB 页大小要求。`v1.0.2` 及更早版本的 JNI 库 `libffmpegkit.so` 只有 4 KB 对齐，请升级。
 
 ## API
 

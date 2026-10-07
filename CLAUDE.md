@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 FFmpegKit is an open-source **Android library** (not an app) wrapping FFmpeg 8.0.1 with Kotlin API and C++ JNI bridge. Published via JitPack for dependency consumption:
 
 ```kotlin
-implementation("com.github.zqcformix:FFmpegKitx:v1.0.2")
+implementation("com.github.zqcformix:FFmpegKitx:v1.0.3")
 ```
 
 ## Build Commands
