@@ -68,9 +68,11 @@ Sample app demonstrating library usage. Uses `FFmpegKit.xxx()` API calls — no 
 
 ## Build Configuration
 
-- **Gradle**: 8.14.4 with Kotlin DSL, AGP 8.13.2
-- **Kotlin**: 2.3.10, JVM target 17
-- **SDK**: minSdk 26, targetSdk/compileSdk 36
+- **Gradle**: 9.8.0 with Kotlin DSL, AGP 9.4.1; daemon JVM pinned to JetBrains JDK 17 via `gradle/gradle-daemon-jvm.properties`
+- **AGP 9 compatibility mode**: `gradle.properties` sets `android.builtInKotlin=false` and `android.newDsl=false`, so modules still apply `org.jetbrains.kotlin.android` and use the legacy `android {}` DSL (deprecation warnings expected; removed in AGP 10)
+- **Build script gotcha**: AGP 9 registers a `java` extension that shadows `java.*` packages in `build.gradle.kts` — `import` JDK classes instead of writing `java.nio.ByteBuffer` inline
+- **Kotlin**: 2.4.20, JVM target 17
+- **SDK**: minSdk 26, targetSdk/compileSdk 37
 - **Version catalog**: `gradle/libs.versions.toml`
 - **Native build**: CMake 3.22.1, C++17, NDK pinned to `28.2.13676358` via `ndkVersion` (must match `jitpack.yml`; unpinned builds fell back to NDK r27 and shipped a 4 KB-aligned JNI lib in v1.0.2)
 - **Publishing**: maven-publish plugin + JitPack; every publish task runs `verifyNativeAlignment` first

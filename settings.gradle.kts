@@ -26,6 +26,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "FFmpegKit"
+rootProject.name = "FFmpegKitx"
 include(":app")
 include(":ffmpegkit")

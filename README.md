@@ -63,7 +63,7 @@ FFmpegKit.printInfo()               // 输出所有信息到 Logcat（tag: FFmpe
 | 项目 | 版本 |
 |------|------|
 | Min SDK | 26 (Android 8.0) |
-| Target SDK | 36 |
+| Target SDK | 37 |
 | JDK | 17 |
 
 ## FFmpeg 库版本
