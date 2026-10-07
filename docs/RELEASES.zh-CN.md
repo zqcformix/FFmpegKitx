@@ -16,7 +16,7 @@
 
 ### Android 坐标需要统一的地方
 
-- 当前 Maven publication：groupId `com.github.zqcformix`、artifactId `ffmpegkit`、version 取根目录 `build.gradle.kts` 的 `versionName`（目前是 `1.0.0`），而最新标签是 `v1.0.2`。JitPack 的坐标由仓库和标签决定，不能从本地 POM 推断。发布前把 `versionName` 与标签对齐，在空白消费者工程中验证实际解析地址后再更新 README。
+- 当前 Maven publication：groupId `com.github.zqcformix`、artifactId `ffmpegkit`、version 取根目录 `build.gradle.kts` 的 `versionName`（已改为待发布的 `1.0.3`；v1.0.0–v1.0.2 都错误地带着 `1.0.0`）。JitPack 的坐标由仓库和标签决定，不能从本地 POM 推断。每次发布前把 `versionName` 与标签对齐，在空白消费者工程中验证实际解析地址后再更新 README。
 - Kotlin 包名 `io.github.nova.ffmpegkit` 不必与 groupId 相同，但迁移到 Maven Central 时 groupId 不能使用 `io.github.nova`（需要拥有对应的 GitHub 账号）。
 
 ## 2. 每次发布的检查清单
@@ -64,7 +64,7 @@ Google Play 自 2025-11-01 起要求面向 Android 15+ 的新应用和更新支�
 
 ## 4. 许可证
 
-**本项目封装代码**：README 和 POM 声明 MIT，但仓库根目录**还没有 LICENSE 文件**，README 的 License 徽章链接目前无效。发布前补齐 MIT 正文并确认权利人。MIT 只适用于本项目封装代码，不能把预编译 FFmpeg、其头文件和静态链接的依赖都标成 MIT，也不构成对第三方代码的重新授权。
+**本项目封装代码**：根目录 `LICENSE` 为 MIT 正文（权利人 Joe Zhou），README 和 POM 与之一致。第三方组件的许可、版本、源码地址和 configure 参数见根目录 `THIRD_PARTY_NOTICES.md`，许可全文在 `licenses/`。MIT 只适用于本项目封装代码，不能把预编译 FFmpeg、其头文件和静态链接的依赖都标成 MIT，也不构成对第三方代码的重新授权。
 
 **FFmpeg 与外部库**：2026-10-07 对三个 ABI 的 `libavutil.so` 做了静态字符串检查，自报 `LGPL version 2.1 or later`，configure 未包含 `--enable-gpl`、`--enable-version3`、`--enable-nonfree`，启用了 `--enable-libass --enable-libfreetype --enable-libfribidi`。这只说明这些文件的自报信息，不能证明全部二进制和分发材料合规。
 
@@ -88,8 +88,8 @@ Google Play 自 2025-11-01 起要求面向 Android 15+ 的新应用和更新支�
 ## 5. 首次扩大分发前的待办
 
 - [ ] 发布带固定 NDK 的新版本，修复 v1.0.2 JNI 库的 16 KB 对齐问题（见 3.1）
-- [ ] 根目录补齐 LICENSE（MIT 正文与权利人）
-- [ ] 新增第三方声明文件，包含 FFmpeg、libass、FreeType、FriBidi、HarfBuzz 的许可文本与版权声明
-- [ ] 为每个预编译二进制建立来源、源码/补丁、构建配方、SHA-256 与组件清单的对应记录（当前缺少完整的可复建来源链，见路线图 7.1）
-- [ ] 统一 `versionName` 与发布标签
+- [x] 根目录补齐 LICENSE（MIT 正文与权利人）
+- [x] 新增第三方声明文件，包含 FFmpeg、libass、FreeType、FriBidi、HarfBuzz 的许可文本与版权声明。FreeType 版本未记录在二进制中，HarfBuzz 版本（10.1.0）是从字符串推断的，补齐来源记录时一并核实
+- [ ] 为每个预编译二进制建立来源、源码/补丁、构建配方、SHA-256 与组件清单的对应记录（当前缺少完整的可复建来源链，`build_android.sh` 也不在仓库中，见路线图 7.1）
+- [x] 统一 `versionName` 与发布标签（`1.0.3`）
 - [ ] 实际发布后，把本文的规划坐标替换为真实包名、版本与可访问地址，并更新各平台的使用示例
