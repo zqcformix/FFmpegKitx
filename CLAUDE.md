@@ -15,6 +15,7 @@ implementation("com.github.zqcformix:FFmpegKitx:v1.0.2")
 ```bash
 ./gradlew assembleDebug           # Build demo app + library
 ./gradlew :ffmpegkit:assembleRelease  # Build library AAR only
+./gradlew :ffmpegkit:verifyNativeAlignment  # Fail if a 64-bit .so in the release AAR is below 16 KB alignment
 ./gradlew test                    # Unit tests
 ./gradlew connectedAndroidTest    # Instrumented tests
 ./gradlew clean
@@ -71,20 +72,28 @@ Sample app demonstrating library usage. Uses `FFmpegKit.xxx()` API calls — no 
 - **Kotlin**: 2.3.10, JVM target 17
 - **SDK**: minSdk 26, targetSdk/compileSdk 36
 - **Version catalog**: `gradle/libs.versions.toml`
-- **Native build**: CMake 3.22.1, C++17
-- **Publishing**: maven-publish plugin + JitPack
+- **Native build**: CMake 3.22.1, C++17, NDK pinned to `28.2.13676358` via `ndkVersion` (must match `jitpack.yml`; unpinned builds fell back to NDK r27 and shipped a 4 KB-aligned JNI lib in v1.0.2)
+- **Publishing**: maven-publish plugin + JitPack; every publish task runs `verifyNativeAlignment` first
+
+## Planning Docs (`docs/`, Chinese)
+
+- `ROADMAP.zh-CN.md` — milestones and task status; the single source for what is implemented. Editing APIs (trim/split, `FFmpeg` facade) are **designed but not implemented**
+- `ANDROID_API.zh-CN.md` — M1 editing API design draft; the only place that defines M1 scope and limits
+- `ARCHITECTURE.zh-CN.md` — layering, media semantics, upstream trade-offs
+- `RELEASES.zh-CN.md` — release checklist, platform package plan, 16 KB alignment, licensing
+- `GIT_WORKFLOW.zh-CN.md` — branching, commits, merging
+
+Only check a roadmap task after its code is merged to `main` with test evidence.
 
 ## Git Workflow
 
 - **Repository**: https://github.com/zqcformix/FFmpegKitx.git
-- **Branch strategy** (Git Flow):
-  - `main` — stable releases, tagged with version (e.g. `v1.0.0`)
-  - `develop` — integration branch, all feature PRs merge here
-  - `feature/*` — new features, branch from `develop`
-  - `bugfix/*` — bug fixes, branch from `develop`
-  - `hotfix/*` — urgent fixes from `main`
-  - `release/*` — release preparation from `develop`
-- **Commit convention**: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`
+- **Branch strategy** (simplified; details in `docs/GIT_WORKFLOW.zh-CN.md`):
+  - `main` — always releasable; release tags (e.g. `v1.0.2`) are created here
+  - `feat/*`, `fix/*`, `docs/*`, `build/*`, `chore/*` — short-lived branches from `main`, merged back after review
+  - `release/<major.minor>` — optional, only when maintaining an older release line
+  - No long-lived `develop` branch
+- **Commit convention**: `<type>(<scope>): summary`, scope optional — `feat`, `fix`, `docs`, `test`, `refactor`, `build`, `ci`, `chore`
 - **Release flow**: tag on `main` → JitPack auto-builds AAR → users update version
 - **Gitignored**: `*.jks`, `.claude/`
 - **Important**: every significant update must sync both `CLAUDE.md` and `README.md`

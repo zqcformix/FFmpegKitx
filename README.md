@@ -32,6 +32,20 @@ dependencies {
 
 FFmpeg .so 文件已包含在 AAR 中，无需手动下载。
 
+**3. 按需裁剪 ABI（可选）**
+
+FFmpeg `.so` 未压缩体积约为：arm64-v8a 22 MB、armeabi-v7a 20 MB、x86_64 27 MB。用 App Bundle 发布时 Google Play 会按设备分发；直接分发 APK 时，可以去掉不需要的 ABI（例如只用于模拟器的 x86_64）：
+
+```kotlin
+android {
+    defaultConfig {
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
+    }
+}
+```
+
+> **16 KB 页大小**：`v1.0.2` 中的 JNI 库 `libffmpegkit.so` 只有 4 KB 对齐，不满足 Google Play 对面向 Android 15+ 应用的 16 KB 要求（FFmpeg 的 `.so` 已达标）。修复已在源码中完成，将随下一个版本发布，详见[发布文档](docs/RELEASES.zh-CN.md#31-16-kb-页大小)。
+
 ## API
 
 ```kotlin
@@ -66,6 +80,14 @@ FFmpegKit.printInfo()               // 输出所有信息到 Logcat（tag: FFmpe
 **启用特性**: libass, libfreetype, libfribidi, mediacodec, jni
 
 **支持架构**: arm64-v8a, armeabi-v7a, x86_64
+
+## 文档
+
+- [路线图](docs/ROADMAP.zh-CN.md)：里程碑与实现状态。时间裁剪、分割等编辑能力目前处于设计阶段，尚未实现
+- [Android 编辑 API 设计](docs/ANDROID_API.zh-CN.md)（草案）
+- [架构与设计依据](docs/ARCHITECTURE.zh-CN.md)
+- [发布与第三方组件检查](docs/RELEASES.zh-CN.md)
+- [Git 协作规范](docs/GIT_WORKFLOW.zh-CN.md)
 
 ## License
 
