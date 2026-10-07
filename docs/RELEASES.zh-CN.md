@@ -6,7 +6,7 @@
 
 | 平台 | 当前状态 | 渠道与拟定坐标 |
 | --- | --- | --- |
-| Android | JitPack `com.github.zqcformix:FFmpegKitx:v1.0.2`，只含信息查询 API；编辑 API 未实现 | 继续使用 JitPack。若迁移到 Maven Central，groupId 用 `io.github.zqcformix`（可通过 GitHub 账号验证命名空间），artifactId 拟为 `ffmpegkitx-android` |
+| Android | JitPack `com.github.zqcformix:FFmpegKitx:v1.0.3`，只含信息查询 API；编辑 API 未实现 | 继续使用 JitPack。若迁移到 Maven Central，groupId 用 `io.github.zqcformix`（可通过 GitHub 账号验证命名空间），artifactId 拟为 `ffmpegkitx-android` |
 | iOS / macOS（M4） | 未开始 | SwiftPM：本仓库的 `Package.swift` 加二进制 `FFmpegKitxCore.xcframework`，通过 Git URL + tag 引入 |
 | HarmonyOS（M4） | 未开始 | OHPM 包 `@ffmpegkitx/harmony` + HAR，发布到 <https://ohpm.openharmony.cn/>；scope 未注册 |
 | Linux / Windows（远期候选） | 未排期 | `ffmpegkitx-core` 原生归档 + CMake config，放在本仓库 GitHub Releases |
@@ -16,7 +16,7 @@
 
 ### Android 坐标需要统一的地方
 
-- 当前 Maven publication：groupId `com.github.zqcformix`、artifactId `ffmpegkit`、version 取根目录 `build.gradle.kts` 的 `versionName`（已改为待发布的 `1.0.3`；v1.0.0–v1.0.2 都错误地带着 `1.0.0`）。JitPack 的坐标由仓库和标签决定，不能从本地 POM 推断。每次发布前把 `versionName` 与标签对齐，在空白消费者工程中验证实际解析地址后再更新 README。
+- 当前 Maven publication：groupId `com.github.zqcformix`、artifactId `ffmpegkit`、version 取根目录 `build.gradle.kts` 的 `versionName`（`1.0.3` 起与标签一致；v1.0.0–v1.0.2 都错误地带着 `1.0.0`）。JitPack 的坐标由仓库和标签决定，不能从本地 POM 推断。每次发布前把 `versionName` 与标签对齐，在空白消费者工程中验证实际解析地址后再更新 README。
 - Kotlin 包名 `io.github.nova.ffmpegkit` 不必与 groupId 相同，但迁移到 Maven Central 时 groupId 不能使用 `io.github.nova`（需要拥有对应的 GitHub 账号）。
 
 ## 2. 每次发布的检查清单
@@ -53,7 +53,7 @@ Google Play 自 2025-11-01 起要求面向 Android 15+ 的新应用和更新支�
 
 - `ffmpegkit/build.gradle.kts` 固定 `ndkVersion = "28.2.13676358"`（NDK r28 起默认 16 KB 对齐），AGP 在缺少该 NDK 时自动安装。JitPack 上没有 `sdk-manager` 命令，`jitpack.yml` 原先的安装步骤从未生效；2026-10-08 对提交 `e9826e08f9` 的 JitPack 构建确认 AGP 自动安装了 r28.2，`verifyNativeAlignment` 通过，AAR 中 arm64-v8a、x86_64 的 `libffmpegkit.so` 均为 `0x4000`（clang 19.0.1，r530567e）。
 - `verifyNativeAlignment` 检查 release AAR 中每个 64 位 `.so` 的 LOAD 段对齐，不足 16 KB 时让构建失败，并挂在所有 Maven 发布任务之前。32 位 ABI 不会运行在 16 KB 页设备上，因此不检查。
-- 下一个版本发布后，用 v1.0.2 相同的方式下载 AAR 复查 JNI 库，并在发布说明中提示 v1.0.2 用户升级。
+- v1.0.3 发布前在空白消费者工程（Java、AGP 9.4.1、R8 release）中从 JitPack 解析同一提交：`zipalign -c -P 16` 对 APK 中全部 21 个 `.so` 通过，Xiaomi M2102K1AC（Android 14，API 34，arm64-v8a）上 `getVersion()` 返回 `8.0.1`、libass 可用。发布说明提示 v1.0.2 用户升级。之后每次发布都按同样方式复查。
 - APK 侧另用 Build Tools 的 `zipalign -c -P 16 -v 4 <app.apk>` 检查，并在 16 KB 页的模拟器或设备上实际运行。参考：[Android 16 KB 页大小指南](https://developer.android.com/guide/practices/page-sizes)。
 
 ### 3.2 API 级别、ABI 与体积
@@ -87,7 +87,7 @@ Google Play 自 2025-11-01 起要求面向 Android 15+ 的新应用和更新支�
 
 ## 5. 首次扩大分发前的待办
 
-- [ ] 发布带固定 NDK 的新版本，修复 v1.0.2 JNI 库的 16 KB 对齐问题（见 3.1）
+- [x] 发布带固定 NDK 的新版本，修复 v1.0.2 JNI 库的 16 KB 对齐问题（v1.0.3，见 3.1）
 - [x] 根目录补齐 LICENSE（MIT 正文与权利人）
 - [x] 新增第三方声明文件，包含 FFmpeg、libass、FreeType、FriBidi、HarfBuzz 的许可文本与版权声明。FreeType 版本未记录在二进制中，HarfBuzz 版本（10.1.0）是从字符串推断的，补齐来源记录时一并核实
 - [ ] 为每个预编译二进制建立来源、源码/补丁、构建配方、SHA-256 与组件清单的对应记录（当前缺少完整的可复建来源链，`build_android.sh` 也不在仓库中，见路线图 7.1）
