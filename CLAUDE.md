@@ -98,4 +98,4 @@ Only check a roadmap task after its code is merged to `main` with test evidence.
 - **Commit convention**: `<type>(<scope>): summary`, scope optional — `feat`, `fix`, `docs`, `test`, `refactor`, `build`, `ci`, `chore`
 - **Release flow**: tag on `main` → JitPack auto-builds AAR → users update version
 - **Gitignored**: `*.jks`, `.claude/`
-- **Important**: every significant update must sync both `CLAUDE.md` and `README.md`
+- **Important**: every significant update must sync both `CLAUDE.md` and `README.md`. README is for library users only (usage, API, requirements, FFmpeg versions); never add roadmap, planning-doc links or other development plans to it
