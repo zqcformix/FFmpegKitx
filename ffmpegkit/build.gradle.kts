@@ -1,3 +1,8 @@
+// Imported rather than fully qualified: AGP 9 registers a `java` extension that shadows the `java.*` packages.
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.util.zip.ZipFile
+
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin)
@@ -95,16 +100,16 @@ afterEvaluate {
 
 // Google Play requires 16 KB page size support for apps targeting Android 15+.
 // Checks every 64-bit .so shipped in the release AAR; 32-bit ABIs never run on 16 KB page devices.
-val verifyNativeAlignment by tasks.registering {
+val verifyNativeAlignment = tasks.register("verifyNativeAlignment") {
     group = "verification"
     description = "Fails if a 64-bit .so in the release AAR has a LOAD segment aligned below 16 KB."
     val aars = files(tasks.named("bundleReleaseAar"))
     inputs.files(aars)
     doLast {
         fun minLoadAlignment(elf: ByteArray): Long? {
-            val buf = java.nio.ByteBuffer.wrap(elf)
+            val buf = ByteBuffer.wrap(elf)
             if (elf.size < 0x40 || buf.getInt(0) != 0x7F454C46 || elf[4].toInt() != 2) return null
-            buf.order(if (elf[5].toInt() == 1) java.nio.ByteOrder.LITTLE_ENDIAN else java.nio.ByteOrder.BIG_ENDIAN)
+            buf.order(if (elf[5].toInt() == 1) ByteOrder.LITTLE_ENDIAN else ByteOrder.BIG_ENDIAN)
             val phOff = buf.getLong(0x20).toInt()
             val phEntSize = buf.getShort(0x36).toInt() and 0xFFFF
             val phNum = buf.getShort(0x38).toInt() and 0xFFFF
@@ -116,7 +121,7 @@ val verifyNativeAlignment by tasks.registering {
         val checked = mutableListOf<String>()
         val failures = mutableListOf<String>()
         aars.filter { it.name.endsWith(".aar") }.forEach { aar ->
-            java.util.zip.ZipFile(aar).use { zip ->
+            ZipFile(aar).use { zip ->
                 zip.entries().asSequence().filter { it.name.endsWith(".so") }.forEach { entry ->
                     val elf = zip.getInputStream(entry).use { it.readBytes() }
                     if (elf.size > 4 && elf[4].toInt() != 2) return@forEach
