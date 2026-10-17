@@ -23,11 +23,13 @@ using remux::ToMicros;
 
 class Trimmer {
 public:
-    Trimmer(remux::Source input, std::string output, int64_t start_us, int64_t end_us, const remux::Cancellation* cancellation)
+    Trimmer(remux::Source input, std::string output, int64_t start_us, int64_t end_us, bool edit_list,
+            const remux::Cancellation* cancellation)
         : input_(std::move(input)),
           output_path_(std::move(output)),
           start_us_(start_us),
           end_us_(end_us),
+          edit_list_(edit_list),
           cancellation_(cancellation) {}
 
     Status Run() {
@@ -39,6 +41,9 @@ public:
         start_abs_ = in_.origin + start_us_;
         end_abs_ = end_us_ < 0 ? INT64_MAX : in_.origin + end_us_;
 
+        if (edit_list_ && !IsMovFamily(output_path_)) {
+            return Rejected(remux::kReasonUnsupportedMedia, true, "edit list mode needs an MP4 or MOV output");
+        }
         s = remux::OpenOutput(in_, output_path_, cancellation_, &out_);
         if (s.failed()) return s;
         if (start_us_ > 0) {
@@ -128,6 +133,7 @@ private:
             }
             SetAnchor(packet->pts, st->time_base);
             anchored_ = true;
+            FixShift();
             return Emit(packet.get());
         }
 
@@ -202,6 +208,7 @@ private:
 
     int Flush() {
         anchored_ = true;
+        FixShift();
         while (!pending_.empty()) {
             Packet packet = std::move(pending_.front());
             pending_.pop_front();
@@ -231,7 +238,27 @@ private:
         }
         ++track.written;
         // Every stream moves by the same amount, so audio and video keep their relative timing.
-        return remux::WritePacket(in_, &out_, packet, anchor_pts_, anchor_time_base_);
+        return remux::WritePacket(in_, &out_, packet, shift_pts_, shift_time_base_);
+    }
+
+    // What becomes time 0 in the output: the anchor keyframe, or in edit list mode the requested start.
+    // There the packets from the keyframe up to the start get negative timestamps; the MP4 muxer then
+    // writes an edit list so that players which honour it decode them but start showing at the start.
+    void FixShift() {
+        shift_pts_ = anchor_pts_;
+        shift_time_base_ = anchor_time_base_;
+        if (edit_list_ && av_compare_ts(start_abs_, AV_TIME_BASE_Q, anchor_pts_, anchor_time_base_) > 0) {
+            shift_pts_ = start_abs_;
+            shift_time_base_ = AV_TIME_BASE_Q;
+        }
+    }
+
+    // The containers whose muxer (movenc) writes edit lists for negative start timestamps.
+    static bool IsMovFamily(const std::string& path) {
+        const AVOutputFormat* format = av_guess_format(nullptr, path.c_str(), nullptr);
+        if (format == nullptr) return false;
+        const std::string name = format->name;
+        return name == "mp4" || name == "mov" || name == "ipod" || name == "3gp" || name == "3g2";
     }
 
     bool AllFinished() const {
@@ -262,6 +289,7 @@ private:
     const std::string output_path_;
     const int64_t start_us_;
     const int64_t end_us_;
+    const bool edit_list_;
     const remux::Cancellation* const cancellation_;
 
     remux::Input in_;
@@ -277,6 +305,8 @@ private:
     int64_t backoff_us_ = 0;
     int64_t anchor_pts_ = 0;
     AVRational anchor_time_base_ = AV_TIME_BASE_Q;
+    int64_t shift_pts_ = 0;
+    AVRational shift_time_base_ = AV_TIME_BASE_Q;
     std::deque<Packet> pending_;
     int64_t pending_end_abs_ = INT64_MIN;
 
@@ -298,9 +328,10 @@ Java_io_github_nova_ffmpegkit_NativeTrim_trim(
         jbyteArray output,
         jlong start_us,
         jlong end_us,
+        jboolean edit_list,
         jlong cancellation) {
     Trimmer trimmer(remux::ToSource(env, input_path, input_fd), ToUtf8Path(env, output), start_us, end_us,
-                    remux::FromHandle(cancellation));
+                    edit_list == JNI_TRUE, remux::FromHandle(cancellation));
     const Status status = trimmer.Run();
     std::vector<int64_t> times;
     if (!status.failed()) times = {trimmer.actual_start_us(), trimmer.actual_end_us()};

@@ -15,6 +15,7 @@ import io.github.nova.ffmpegkit.MediaInfo
 import io.github.nova.ffmpegkit.MediaInput
 import io.github.nova.ffmpegkit.SplitRequest
 import io.github.nova.ffmpegkit.TimeRange
+import io.github.nova.ffmpegkit.TrimMode
 import io.github.nova.ffmpegkit.TrimRequest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -55,6 +56,9 @@ class VideoSource(
         mimeType?.let { MimeTypeMap.getSingleton().getExtensionFromMimeType(it) }
             ?: displayName?.substringAfterLast('.', "")?.lowercase()?.takeIf { it.isNotEmpty() && it.all(Char::isLetterOrDigit) }
             ?: "mp4"
+
+    /** TrimMode.EDIT_LIST needs an MP4-family container. */
+    val supportsEditList: Boolean = extension.lowercase() in setOf("mp4", "m4v", "mov", "3gp", "3g2")
 
     val outputMimeType: String =
         mimeType?.takeIf { it.startsWith("video/") }
@@ -100,14 +104,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun trim(range: TimeRange) {
+    fun trim(range: TimeRange, mode: TrimMode) {
         val source = _state.value.source ?: return
-        run(source, "Trimming to $range") {
+        run(source, "Trimming to $range ($mode)") {
             val name = "${source.stem}-trim-${timestamp()}.${source.extension}"
             val saved = gallery.saveTrim(name, source.outputMimeType, source.extension) { output ->
-                FFmpeg.trim(TrimRequest(MediaInput.of(resolver, source.uri), output, range))
+                FFmpeg.trim(TrimRequest(MediaInput.of(resolver, source.uri), output, range, mode))
             }
-            "trim requested=$range" to listOf(saved)
+            "trim requested=$range mode=$mode" to listOf(saved)
         }
     }
 

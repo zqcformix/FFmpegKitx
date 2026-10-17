@@ -1,6 +1,6 @@
 # Android 编辑 API 设计（M1 草案）
 
-> **状态：大部分已在 `main` 实现，尚未发布。** 已实现：`FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`、`TrimRequest`、`SplitRequest.byDuration`/`byRanges`、`MediaInput`/`MediaOutput`、`File`/`Uri` 的 `trimTo`/`splitTo`/`probe` 扩展、`MediaInfo`/`StreamInfo`、`TimeRange`、`FFmpegException`，以及第 3、4、7、8 节的行为和协程取消。**未实现**：第 5 节的进度回调与 `MediaProgress`（路线图 5.2），因此第 5 节示例无法编译；交付复制阶段的取消（5.3）；edit list 模式（2.4）。已发布的 `v1.0.3` 只包含 `FFmpegKit` 信息查询接口。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
+> **状态：大部分已在 `main` 实现，尚未发布。** 已实现：`FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`、`TrimRequest`（含 `TrimMode`）、`SplitRequest.byDuration`/`byRanges`、`MediaInput`/`MediaOutput`、`File`/`Uri` 的 `trimTo`/`splitTo`/`probe` 扩展、`MediaInfo`/`StreamInfo`、`TimeRange`、`FFmpegException`，以及第 3、4、7、8 节的行为和协程取消。**未实现**：第 5 节的进度回调与 `MediaProgress`（路线图 5.2），因此第 5 节示例无法编译；交付复制阶段的取消（5.3）。已发布的 `v1.0.3` 只包含 `FFmpegKit` 信息查询接口。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
 
 本文是 M1 范围、行为与限制的唯一出处；其他文档只引用，不复述。
 
@@ -64,7 +64,9 @@ suspend fun trimFromUri(context: Context, uri: Uri, output: File) = FFmpeg.trim(
   - 视频从起点之前（含起点）最近的关键帧开始；早于该关键帧的音频包丢弃。纯音频从包含起点的那个包开始。
   - 每条流在第一个解码时间（dts）达到终点的包处停止，与 `ffmpeg -c copy` 一致。尾部可能出现显示时间超过终点的 P 帧，而它前面的个别 B 帧缺失。
   - `requestedRange` 与 `actualRange` 都以输入的起始时间（`start_time`）为零点。`actualRange` 取写入包的最早显示时间与最晚结束时间；早于零点的包（如 AAC priming）按 0 计。MP4 报告的 `duration` 是各帧时长之和，可能比 `actualRange` 略短。
-- MP4/MOV 计划提供可选的 edit list 模式（路线图 2.4，评估中）：保留前导关键帧，让支持 edit list 的播放器从请求时间点开始显示。
+- **edit list 起点**（`TrimRequest(..., mode = TrimMode.EDIT_LIST)` 或 `trimTo(..., mode = TrimMode.EDIT_LIST)`，路线图 2.4）：只用于 MP4 家族输出（扩展名 `mp4`、`m4v`、`m4a`、`mov`、`3gp`、`3g2`，其他扩展名在执行前抛 `IllegalArgumentException`）。写入的数据与默认的 `TrimMode.KEYFRAME` 完全相同（仍从关键帧开始，`actualRange` 也相同），但输出的时间轴以请求起点为零点：关键帧到起点之间的帧得到负时间戳，MP4 muxer 据此写入 edit list，支持它的播放器解码这些帧但不显示，从请求起点开始播放，时长也按起点计算。做法与 ffmpeg CLI 的 `-ss` 输入 seek 加 `-c copy` 写 MP4 相同。起点恰好是关键帧时两种模式的输出相同。
+  - 播放器实测（2.0 s 处关键帧、请求 2.5 s 起，见 `TrimEditListTest`）：Media3 ExoPlayer、FFmpeg（libavformat，mpv、VLC 等基于它）与小米相册（4.2.0.25）遵循 edit list，从 2.5 s 开始显示；Android 系统 `MediaPlayer`（API 34 小米、API 35 模拟器）忽略它，从关键帧 2.0 s 开始显示，时长也多出前导部分，MediaStore 扫描记录的时长同样包含前导部分。在忽略 edit list 的播放器上，效果与默认模式相同。小米相册的缩略图取请求起点之后的第一个关键帧（本例 3.0 s），播放时仍从 2.5 s 开始。
+  - 按显式范围分割（`SplitRequest.byRanges`）总是使用默认模式。
 - 输出扩展名决定容器；源编码必须与该容器兼容。改扩展名不等于转码。
 - 没有索引的输入（MPEG-TS、ADTS 等裸流）只能按字节位置 seek，可能落在所需关键帧（或包含起点的音频包）之后。此时依次在起点前 1、2、4…… s 处重新 seek，最后从输入开头读取，结果与从头读取完全相同，只是更慢；有索引的 MP4、Matroska 不受影响。
 - 需要帧精确边界时使用精确裁剪（路线图 10.1）。

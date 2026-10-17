@@ -86,6 +86,8 @@ dependencies {
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.test.runner)
+    // Playback checks for TrimMode.EDIT_LIST; test APK only, not a library dependency.
+    androidTestImplementation(libs.androidx.media3.exoplayer)
 }
 
 afterEvaluate {

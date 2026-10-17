@@ -106,6 +106,7 @@ internal object Splitter {
                     File(workDirectory, number(i + 1) + "." + containerExtension).path.toByteArray(),
                     range.startMicros,
                     range.endExclusiveMicros ?: -1,
+                    false, // byRanges always starts at the keyframe
                     cancellation?.nativeHandle ?: 0L,
                 )
                 cancellation?.throwIfCancelled() // before anything is published
