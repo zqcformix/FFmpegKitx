@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 FFmpegKit is an open-source **Android library** (not an app) wrapping FFmpeg 8.0.1 with Kotlin API and C++ JNI bridge. Published via JitPack for dependency consumption:
 
 ```kotlin
-implementation("com.github.zqcformix:FFmpegKitx:v1.0.3")
+implementation("com.github.zqcformix:FFmpegKitx:v1.1.0")
 ```
 
 ## Build Commands
@@ -69,7 +69,7 @@ ffmpegkit/src/main/
 └── jniLibs/{arm64-v8a,armeabi-v7a,x86_64}/  # FFmpeg .so files (committed, bundled in AAR)
 ```
 
-- **Public API**: `FFmpegKit` object — `getVersion()`, `getBuildConfiguration()`, `checkLibassAvailability()`, `isLibassAvailable()`, `printInfo()` (released). Unreleased on `main`: `FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`, `TrimRequest`/`TrimMode`, `SplitRequest.byDuration`/`byRanges`, `MediaInput`, `MediaOutput`, `TrimResult`/`SplitResult`/`SplitSegment`, `MediaInfo`/`StreamInfo`, `TimeRange`, `FFmpegException`, `File`/`Uri` `trimTo`/`splitTo`/`probe`. README documents only released API, so it is updated at the next release
+- **Public API**: `FFmpegKit` object — `getVersion()`, `getBuildConfiguration()`, `checkLibassAvailability()`, `isLibassAvailable()`, `printInfo()` (since v1.0). Editing API (v1.1.0): `FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`, `TrimRequest`/`TrimMode`, `SplitRequest.byDuration`/`byRanges`, `MediaInput`, `MediaOutput`, `TrimResult`/`SplitResult`/`SplitSegment`, `MediaInfo`/`StreamInfo`, `TimeRange`, `FFmpegException`, `File`/`Uri` `trimTo`/`splitTo`/`probe`. README documents released API only; new API goes into it at the next release
 - **Cancellation**: every editing call runs through `runNative`; native loops and FFmpeg's `interrupt_callback` poll the `NativeCancellation` flag, and Kotlin calls `throwIfCancelled()` before publishing. Work cancelled this way must end as `CancellationException`, never `FFmpegException`
 - **Error handling**: media operations report every failure as `FFmpegException` via `mapIoFailures` / `nativeFailure`; never wrap `CancellationException` or `IllegalArgumentException`. Only append to `FFmpegException.Reason` (`FFmpegExceptionTest` pins the order). JNI symbol names depend on class names, so `consumer-rules.pro` keeps classes with native methods
 - **Writing outputs**: every operation that creates a file goes through `OutputDelivery` (`deliver` for one file; `Splitter` writes into a temp directory next to the outputs and publishes each with `publishFile`). Nothing ever overwrites a file; a `Uri` output (caller-owned) is written to a cache temp file and copied in with `"wt"` by `UriDelivery`. `content://` inputs are read through their file descriptor, never as paths. Android's SELinux denies hard links to app files (`AccessDeniedException`), so on Android 11+ publishing uses `renameat2`; host tests on the JVM exercise the hard-link and copy paths
@@ -77,7 +77,7 @@ ffmpegkit/src/main/
 - **Instrumented tests**: `ffmpegkit/src/androidTest` (`:ffmpegkit:connectedDebugAndroidTest`, needs a device or emulator). `PackagedLibrariesTest` pins the FFmpeg version, library versions and configure flags that README documents — change README and the test together when the prebuilt .so files change. Media tests use the samples in `ffmpegkit/src/androidTest/assets/media/`; their expected ranges and packet counts come from `ffprobe -show_packets`, so recompute them if the samples are regenerated. `-e keepOutputs true` keeps `TrimTest`/`SplitTest`/`SplitRangesTest`/`MediaRegressionTest` outputs in the test app's cache for pulling with `run-as` (install the test APK with `adb install -t`, run with `am instrument`; `connectedDebugAndroidTest` uninstalls it afterwards) and checking with `scripts/verify-outputs.ps1`. `MediaRegressionTest` (roadmap 2.6) covers long GOP, VFR, MPEG-TS with a non-zero start time, index-less ADTS, and Unicode/space paths. `TrimEditListTest` (roadmap 2.4) plays outputs with Media3 ExoPlayer (test-only dependency) and `MediaPlayer` and reads the first rendered frame back through OpenGL (`GlFrameGrabber`); an `ImageReader` crashes in the platform on Xiaomi hardware decoders. Xiaomi devices ask to confirm every test APK install; a cancelled install still ends in `BUILD SUCCESSFUL` with no tests run, so check the result XML. Unattended runs: boot AVD `375x812_Unit_IN` (x86_64, API 35) and set `ANDROID_SERIAL=emulator-5554`. `MediaUriTest` inserts and deletes its own MediaStore items under `Movies/FFmpegKitTest` (API 29+, no permission needed)
 - **JNI naming**: `Java_io_github_nova_ffmpegkit_FFmpegKit_methodName` (maps to `FFmpegKit` object, not Activity)
 - **maven-publish** plugin configured for JitPack (`groupId: com.github.zqcformix`, `artifactId: ffmpegkit`)
-- **consumer-rules.pro**: keeps `FFmpegKit`, classes with native methods, and the JNI-constructed `NativeRemuxStatus`
+- **consumer-rules.pro**: keeps `FFmpegKit`, classes with native methods, and the JNI-constructed `NativeRemuxStatus` and `NativeProbeResult`
 
 ### app (Demo Module)
 
@@ -111,7 +111,7 @@ Sample app demonstrating library usage through the public API only — no direct
 
 ## Planning Docs (`docs/`, Chinese)
 
-- `ROADMAP.zh-CN.md` — milestones and task status; the single source for what is implemented. Editing APIs (trim/split, `FFmpeg` facade) are **designed but not implemented**. Its "当前进度与下一步" section says where work stopped and what comes next; read it when starting a session and update it when a task lands or the plan changes
+- `ROADMAP.zh-CN.md` — milestones and task status; the single source for what is implemented. Its "当前进度与下一步" section says where work stopped and what comes next; read it when starting a session and update it when a task lands or the plan changes
 - `ANDROID_API.zh-CN.md` — M1 editing API design draft; the only place that defines M1 scope and limits
 - `LOCAL_INTEGRATION.zh-CN.md` — integrating from source (`project(":ffmpegkit")` in this repo, `publishToMavenLocal` elsewhere) and the first media task; its code is verified in a blank AGP 9 consumer project
 - `ARCHITECTURE.zh-CN.md` — layering, media semantics, upstream trade-offs
