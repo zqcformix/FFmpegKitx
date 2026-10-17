@@ -55,7 +55,7 @@
 
 ### 第 1 章　基线与接入
 
-- [x] **1.1 能力清单与非目标**（★；依赖：无）。交付：README 列出平台/ABI、FFmpeg 版本、可调用能力和非目标。验收：信息查询结果与实际打包的 `.so` 一致；未实现能力与未发布依赖明确标注。证据：仪器测试 `ffmpegkit/src/androidTest/.../PackagedLibrariesTest.kt`（`:ffmpegkit:connectedDebugAndroidTest`）核对 README 中的 FFmpeg 版本、6 个库版本、启用特性与 LGPL 配置，2026-10-17 在 x86_64 模拟器（API 35）4/4 通过；arm64-v8a 的版本与配置于 2026-10-08 在 Xiaomi M2102K1AC 上经 `printInfo()` 日志核对一致。
+- [x] **1.1 能力清单与非目标**（★；依赖：无）。交付：README 列出平台/ABI、FFmpeg 版本、可调用能力和非目标。验收：信息查询结果与实际打包的 `.so` 一致；未实现能力与未发布依赖明确标注。证据：仪器测试 `ffmpegkit/src/androidTest/.../PackagedLibrariesTest.kt`（`:ffmpegkit:connectedDebugAndroidTest`）核对 README 中的 FFmpeg 版本、6 个库版本、启用特性与 LGPL 配置，2026-10-17 在 x86_64 模拟器（API 35）和 Xiaomi M2102K1AC（arm64-v8a，API 34）上均 4/4 通过。
 - [ ] **1.2 本地模块接入与第一个媒体任务**（★；依赖：2.1）。交付：`implementation(project(":ffmpegkit"))` 示例、输入输出要求、协程调用示例。验收：新使用者按文档构建示例 App 并产出可播放片段。
 
 ### 第 2 章　快速时间裁剪与分割
