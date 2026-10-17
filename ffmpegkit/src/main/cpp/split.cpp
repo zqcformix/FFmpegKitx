@@ -24,15 +24,17 @@ using remux::ToMicros;
 // are therefore never shorter than that, except the last.
 class Splitter {
 public:
-    Splitter(remux::Source input, std::string directory, std::string extension, int64_t segment_us, int max_segments)
+    Splitter(remux::Source input, std::string directory, std::string extension, int64_t segment_us, int max_segments,
+             const remux::Cancellation* cancellation)
         : input_(std::move(input)),
           directory_(std::move(directory)),
           extension_(std::move(extension)),
           segment_us_(segment_us),
-          max_segments_(max_segments) {}
+          max_segments_(max_segments),
+          cancellation_(cancellation) {}
 
     Status Run() {
-        Status s = remux::OpenInput(input_, &in_);
+        Status s = remux::OpenInput(input_, cancellation_, &in_);
         if (s.failed()) return s;
         if (in_.ctx->duration != AV_NOPTS_VALUE && in_.ctx->duration > 0 &&
             in_.ctx->duration / segment_us_ + 1 > max_segments_) {
@@ -41,14 +43,15 @@ public:
 
         Packet packet(av_packet_alloc());
         if (!packet) return Failure(AVERROR(ENOMEM), false, "allocate packet");
-        int ret;
-        while ((ret = av_read_frame(in_.ctx, packet.get())) >= 0) {
+        int ret = 0;
+        while (!cancellation_->IsCancelled() && (ret = av_read_frame(in_.ctx, packet.get())) >= 0) {
             if (in_.tracks[packet->stream_index].output_index >= 0) {
                 s = Write(packet.get());
                 if (s.failed()) return s;
             }
             av_packet_unref(packet.get());
         }
+        if (cancellation_->IsCancelled() || ret == AVERROR_EXIT) return remux::Cancelled();
         if (ret != AVERROR_EOF) return Failure(ret, false, "read input");
         if (starts_abs_.empty()) return Rejected(remux::kReasonRangeOutsideMedia, false, "the input has no packets");
         return remux::CloseOutput(&out_);
@@ -97,7 +100,7 @@ private:
     Status StartSegment(int64_t anchor_pts, AVRational anchor_time_base, int64_t start_abs) {
         const int index = static_cast<int>(starts_abs_.size()) + 1;
         if (index > max_segments_) return Rejected(remux::kReasonTooManySegments, false, TooManySegments());
-        Status s = remux::OpenOutput(in_, SegmentPath(index), &out_);
+        Status s = remux::OpenOutput(in_, SegmentPath(index), cancellation_, &out_);
         if (s.failed()) return s;
         anchor_pts_ = anchor_pts;
         anchor_time_base_ = anchor_time_base;
@@ -120,6 +123,7 @@ private:
     const std::string extension_;
     const int64_t segment_us_;
     const int max_segments_;
+    const remux::Cancellation* const cancellation_;
 
     remux::Input in_;
     remux::Output out_;
@@ -143,9 +147,10 @@ Java_io_github_nova_ffmpegkit_NativeSplit_split(
         jbyteArray directory,
         jbyteArray extension,
         jlong segment_us,
-        jint max_segments) {
+        jint max_segments,
+        jlong cancellation) {
     Splitter splitter(remux::ToSource(env, input_path, input_fd), ToUtf8Path(env, directory), ToUtf8Path(env, extension),
-                      segment_us, max_segments);
+                      segment_us, max_segments, remux::FromHandle(cancellation));
     const Status status = splitter.Run();
     return remux::ToJava(env, status, status.failed() ? std::vector<int64_t>{} : splitter.Times());
 }

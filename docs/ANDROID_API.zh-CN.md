@@ -1,6 +1,6 @@
 # Android 编辑 API 设计（M1 草案）
 
-> **状态：设计草案，大部分尚未实现。** 第 2 节的 `TimeRange` 和第 6 节的 `FFmpegException` 已在 `main` 实现（未发布）；第 3 节的裁剪、第 4 节的关键帧对齐分割和第 7 节的 `File`/`Uri`/描述符输入与 `Uri` 输出已有内部实现，公开入口尚不存在；其余接口当前源码中不存在，示例无法编译。已发布的 `v1.0.3` 只包含 `FFmpegKit` 信息查询接口。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
+> **状态：大部分已在 `main` 实现，尚未发布。** 已实现：`FFmpeg.trim`/`FFmpeg.split`、`TrimRequest`、`SplitRequest.byDuration`、`MediaInput`/`MediaOutput`、`File`/`Uri` 的 `trimTo`/`splitTo` 扩展、`TimeRange`、`FFmpegException`，以及第 3、4、7 节的行为和协程取消。**未实现**：第 5 节的进度回调与 `MediaProgress`（路线图 5.2），因此第 5 节示例无法编译；交付复制阶段的取消（5.3）；`SplitRequest.byRanges`（2.3）；edit list 模式（2.4）。已发布的 `v1.0.3` 只包含 `FFmpegKit` 信息查询接口。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
 
 本文是 M1 范围、行为与限制的唯一出处；其他文档只引用，不复述。
 
@@ -109,6 +109,7 @@ fun startTrim(
 - `MediaProgress` 包含 `fraction`（0–1，单调不减；总时长未知时为 `null`）和从 1 开始的 `segmentIndex`。关键帧对齐分割的总段数要读完才能确定，因此不提供总段数。
 - `1.0` 留给输出交付阶段。成功与否以挂起函数正常返回或抛出异常为准，不以进度为准。
 - 取消覆盖原生探测、包读写检查点和交付复制。中断依赖底层 I/O 检查点，不保证任意阻塞系统调用立即结束。
+  - 当前实现：取消标志挂在 FFmpeg 的 `interrupt_callback` 上，并在每个包的读写之间检查；被取消的任务删除临时文件、关闭描述符后，挂起函数才以原样的 `CancellationException` 结束，不会发布任何输出。交付开始（重命名、链接或复制）之后的取消不再中断，已完成的交付保留；复制阶段的取消随路线图 5.3 实现。
 - 进度回调抛出的异常会终止任务并原样传播。
 
 ## 6. 错误模型

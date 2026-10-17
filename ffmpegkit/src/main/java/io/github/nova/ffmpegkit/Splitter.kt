@@ -7,14 +7,9 @@ import java.util.Locale
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.microseconds
 
-/** One published segment; [actualRange] is on the input's timeline from its start. */
-internal class SplitSegment(val file: File, val actualRange: TimeRange)
-
-internal class SplitResult(val segments: List<SplitSegment>)
-
 /**
- * Keyframe-aligned single-pass split of a local file (roadmap 2.2). Blocking; the public suspend
- * entry point is roadmap 4.2.
+ * Keyframe-aligned single-pass split (roadmap 2.2); blocking. [FFmpeg.split] is the public suspend
+ * entry point.
  *
  * Every segment except the last is at least [segmentDuration] long and starts at a video keyframe
  * (audio-only input: at a packet boundary); concatenated, the segments hold exactly the input's
@@ -35,13 +30,8 @@ internal object Splitter {
         containerExtension: String,
     ): SplitResult = split(MediaInput.of(input), outputDirectory, segmentDuration, fileNamePrefix, containerExtension)
 
-    fun split(
-        input: MediaInput,
-        outputDirectory: File,
-        segmentDuration: Duration,
-        fileNamePrefix: String,
-        containerExtension: String,
-    ): SplitResult {
+    /** Throws [IllegalArgumentException] for arguments no input could accept. */
+    fun validate(segmentDuration: Duration, fileNamePrefix: String, containerExtension: String) {
         require(segmentDuration.isPositive() && segmentDuration.isFinite()) {
             "segmentDuration must be positive and finite: $segmentDuration"
         }
@@ -55,6 +45,17 @@ internal object Splitter {
         require(containerExtension.isNotEmpty() && containerExtension.all { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' }) {
             "containerExtension must be letters and digits only, without the dot: \"$containerExtension\""
         }
+    }
+
+    fun split(
+        input: MediaInput,
+        outputDirectory: File,
+        segmentDuration: Duration,
+        fileNamePrefix: String,
+        containerExtension: String,
+        cancellation: NativeCancellation? = null,
+    ): SplitResult {
+        validate(segmentDuration, fileNamePrefix, containerExtension)
         if (!outputDirectory.isDirectory) {
             throw FFmpegException(Reason.IO, "output directory does not exist: $outputDirectory")
         }
@@ -77,8 +78,10 @@ internal object Splitter {
                     containerExtension.toByteArray(),
                     segmentDuration.inWholeMicroseconds,
                     MAX_SEGMENTS,
+                    cancellation?.nativeHandle ?: 0L,
                 )
             }
+            cancellation?.throwIfCancelled() // before anything is published
             if (status.failed) throw status.toException(input.description, outputDirectory.path)
             val count = status.timesUs.size / 2
             val files = (1..count).map { index ->
@@ -155,5 +158,6 @@ internal object NativeSplit {
         extension: ByteArray,
         segmentUs: Long,
         maxSegments: Int,
+        cancellation: Long,
     ): NativeRemuxStatus
 }
