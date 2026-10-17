@@ -8,12 +8,15 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.microseconds
 
 /**
- * Keyframe-aligned single-pass split (roadmap 2.2); blocking. [FFmpeg.split] is the public suspend
- * entry point.
+ * Splitting; blocking. [FFmpeg.split] is the public suspend entry point.
  *
- * Every segment except the last is at least [segmentDuration] long and starts at a video keyframe
- * (audio-only input: at a packet boundary); concatenated, the segments hold exactly the input's
- * packets. Segments are written into a temporary directory next to the outputs and published only
+ * [split] is the keyframe-aligned single-pass split (roadmap 2.2): every segment except the last is
+ * at least `segmentDuration` long and starts at a video keyframe (audio-only input: at a packet
+ * boundary); concatenated, the segments hold exactly the input's packets. [splitByRanges] (roadmap
+ * 2.3) trims each requested range independently, exactly as [Trimmer] would, so neighbouring
+ * segments can overlap where a start falls back to an earlier keyframe.
+ *
+ * Either way, segments are written into a temporary directory next to the outputs and published only
  * after all of them succeeded; if publishing fails part-way, the segments this call published are
  * removed again.
  */
@@ -38,6 +41,17 @@ internal object Splitter {
         require(segmentDuration.inWholeMicroseconds.microseconds == segmentDuration) {
             "segmentDuration must be a whole number of microseconds: $segmentDuration"
         }
+        validateNaming(fileNamePrefix, containerExtension)
+    }
+
+    /** Throws [IllegalArgumentException] for arguments no input could accept. */
+    fun validate(ranges: List<TimeRange>, fileNamePrefix: String, containerExtension: String) {
+        require(ranges.isNotEmpty()) { "ranges must not be empty" }
+        require(ranges.size <= MAX_SEGMENTS) { "at most $MAX_SEGMENTS ranges, got ${ranges.size}" }
+        validateNaming(fileNamePrefix, containerExtension)
+    }
+
+    private fun validateNaming(fileNamePrefix: String, containerExtension: String) {
         require(fileNamePrefix.isNotEmpty() && fileNamePrefix.none { it == '/' || it == '\u0000' } &&
             fileNamePrefix != "." && fileNamePrefix != "..") {
             "fileNamePrefix must be a non-empty file name without '/': \"$fileNamePrefix\""
@@ -56,6 +70,64 @@ internal object Splitter {
         cancellation: NativeCancellation? = null,
     ): SplitResult {
         validate(segmentDuration, fileNamePrefix, containerExtension)
+        val segments = writeAndPublish(input, outputDirectory, fileNamePrefix, containerExtension) { opened, workDirectory ->
+            val status = NativeSplit.split(
+                opened.path?.toByteArray(),
+                opened.fd,
+                workDirectory.path.toByteArray(),
+                containerExtension.toByteArray(),
+                segmentDuration.inWholeMicroseconds,
+                MAX_SEGMENTS,
+                cancellation?.nativeHandle ?: 0L,
+            )
+            cancellation?.throwIfCancelled() // before anything is published
+            if (status.failed) throw status.toException(input.description, outputDirectory.path)
+            (0 until status.timesUs.size / 2).map { TimeRange(status.timesUs[2 * it].microseconds, status.timesUs[2 * it + 1].microseconds) }
+        }
+        return SplitResult(segments.map { (file, actual) -> SplitSegment(file, actual, requestedRange = null) })
+    }
+
+    /** One segment per range, numbered in the order of [ranges]; each is what [Trimmer.trim] writes for that range. */
+    fun splitByRanges(
+        input: MediaInput,
+        outputDirectory: File,
+        ranges: List<TimeRange>,
+        fileNamePrefix: String,
+        containerExtension: String,
+        cancellation: NativeCancellation? = null,
+    ): SplitResult {
+        validate(ranges, fileNamePrefix, containerExtension)
+        val segments = writeAndPublish(input, outputDirectory, fileNamePrefix, containerExtension) { opened, workDirectory ->
+            // Each range opens the input again (a descriptor is read from offset 0 every time) and seeks on its own.
+            ranges.mapIndexed { i, range ->
+                val status = NativeTrim.trim(
+                    opened.path?.toByteArray(),
+                    opened.fd,
+                    File(workDirectory, number(i + 1) + "." + containerExtension).path.toByteArray(),
+                    range.startMicros,
+                    range.endExclusiveMicros ?: -1,
+                    cancellation?.nativeHandle ?: 0L,
+                )
+                cancellation?.throwIfCancelled() // before anything is published
+                if (status.failed) throw status.toException("${input.description} (range ${i + 1}: $range)", outputDirectory.path)
+                TimeRange(status.timesUs[0].microseconds, status.timesUs[1].microseconds)
+            }
+        }
+        return SplitResult(segments.mapIndexed { i, (file, actual) -> SplitSegment(file, actual, ranges[i]) })
+    }
+
+    /**
+     * Checks the naming scheme, lets [write] fill a temporary directory with `0001.<extension>`… and
+     * return their actual ranges, then publishes them as `<prefix>-0001.<extension>`… in
+     * [outputDirectory]. The temporary directory is always removed.
+     */
+    private fun writeAndPublish(
+        input: MediaInput,
+        outputDirectory: File,
+        fileNamePrefix: String,
+        containerExtension: String,
+        write: (OpenedInput, File) -> List<TimeRange>,
+    ): List<Pair<File, TimeRange>> {
         if (!outputDirectory.isDirectory) {
             throw FFmpegException(Reason.IO, "output directory does not exist: $outputDirectory")
         }
@@ -70,30 +142,13 @@ internal object Splitter {
         }
         var failure: Throwable? = null
         try {
-            val status = input.open().use { opened ->
-                NativeSplit.split(
-                    opened.path?.toByteArray(),
-                    opened.fd,
-                    workDirectory.path.toByteArray(),
-                    containerExtension.toByteArray(),
-                    segmentDuration.inWholeMicroseconds,
-                    MAX_SEGMENTS,
-                    cancellation?.nativeHandle ?: 0L,
-                )
-            }
-            cancellation?.throwIfCancelled() // before anything is published
-            if (status.failed) throw status.toException(input.description, outputDirectory.path)
-            val count = status.timesUs.size / 2
-            val files = (1..count).map { index ->
-                File(workDirectory, number(index) + "." + containerExtension) to
-                    File(outputDirectory, fileNamePrefix + "-" + number(index) + "." + containerExtension)
+            val actualRanges = input.open().use { opened -> write(opened, workDirectory) }
+            val files = actualRanges.indices.map { i ->
+                File(workDirectory, number(i + 1) + "." + containerExtension) to
+                    File(outputDirectory, fileNamePrefix + "-" + number(i + 1) + "." + containerExtension)
             }
             SegmentPublisher.publishAll(input.file, files)
-            return SplitResult(
-                files.mapIndexed { i, (_, target) ->
-                    SplitSegment(target, TimeRange(status.timesUs[2 * i].microseconds, status.timesUs[2 * i + 1].microseconds))
-                },
-            )
+            return files.map { it.second }.zip(actualRanges)
         } catch (e: Throwable) {
             failure = e
             throw e

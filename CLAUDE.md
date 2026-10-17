@@ -40,7 +40,7 @@ The publishable library. Contains all native code, FFmpeg headers, and public Ko
 ffmpegkit/src/main/
 ├── java/io/github/nova/ffmpegkit/
 │   ├── FFmpegKit.kt              # Public API: singleton object with @JvmStatic methods (info queries)
-│   ├── FFmpeg.kt                 # Public editing API: FFmpeg.trim/split/probe, TrimRequest, SplitRequest, results, trimTo/splitTo/probe extensions (M1 4.2, 3.2)
+│   ├── FFmpeg.kt                 # Public editing API: FFmpeg.trim/split/probe, TrimRequest, SplitRequest (byDuration/byRanges), results, trimTo/splitTo/probe extensions (M1 4.2, 3.2, 2.3)
 │   ├── MediaInfo.kt              # Public probe result: MediaInfo, StreamInfo.Video/Audio/Other; unknown values are null (M1 3.2)
 │   ├── Prober.kt                 # Internal blocking probe over probe.cpp; NativeProbeResult parsing (layout in probe.cpp)
 │   ├── Cancellation.kt           # NativeCancellation (flag shared with native) and runNative (IO dispatcher + cancel-then-wait)
@@ -49,7 +49,7 @@ ffmpegkit/src/main/
 │   ├── ErrorMapping.kt           # Internal: AVERROR/errno → Reason table, mapIoFailures, nativeFailure
 │   ├── MediaIo.kt                # Public MediaInput (File / content Uri / ParcelFileDescriptor) and MediaOutput (File / Uri) with internal subclasses; UriDelivery (M1 3.1)
 │   ├── Trimmer.kt                # Internal blocking fast trim (MediaInput → MediaOutput) over trim.cpp (M1 2.1)
-│   ├── Splitter.kt               # Internal blocking keyframe-aligned split over split.cpp; SegmentPublisher rollback (M1 2.2)
+│   ├── Splitter.kt               # Internal blocking split: keyframe-aligned over split.cpp (M1 2.2), by ranges as one native trim per range (M1 2.3); SegmentPublisher rollback
 │   ├── NativeRemux.kt            # NativeRemuxStatus: JNI result of trim/split → FFmpegException / IllegalArgumentException
 │   ├── OutputDelivery.kt         # Temp file + no-overwrite publish: renameat2 NOREPLACE → hard link → CREATE_NEW copy (M1 2.5)
 │   └── MediaInspector.kt         # Internal: full-decode summary and per-packet digests for verifying outputs
@@ -68,7 +68,7 @@ ffmpegkit/src/main/
 └── jniLibs/{arm64-v8a,armeabi-v7a,x86_64}/  # FFmpeg .so files (committed, bundled in AAR)
 ```
 
-- **Public API**: `FFmpegKit` object — `getVersion()`, `getBuildConfiguration()`, `checkLibassAvailability()`, `isLibassAvailable()`, `printInfo()` (released). Unreleased on `main`: `FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`, `TrimRequest`, `SplitRequest.byDuration`, `MediaInput`, `MediaOutput`, `TrimResult`/`SplitResult`/`SplitSegment`, `MediaInfo`/`StreamInfo`, `TimeRange`, `FFmpegException`, `File`/`Uri` `trimTo`/`splitTo`/`probe`. README documents only released API, so it is updated at the next release
+- **Public API**: `FFmpegKit` object — `getVersion()`, `getBuildConfiguration()`, `checkLibassAvailability()`, `isLibassAvailable()`, `printInfo()` (released). Unreleased on `main`: `FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`, `TrimRequest`, `SplitRequest.byDuration`/`byRanges`, `MediaInput`, `MediaOutput`, `TrimResult`/`SplitResult`/`SplitSegment`, `MediaInfo`/`StreamInfo`, `TimeRange`, `FFmpegException`, `File`/`Uri` `trimTo`/`splitTo`/`probe`. README documents only released API, so it is updated at the next release
 - **Cancellation**: every editing call runs through `runNative`; native loops and FFmpeg's `interrupt_callback` poll the `NativeCancellation` flag, and Kotlin calls `throwIfCancelled()` before publishing. Work cancelled this way must end as `CancellationException`, never `FFmpegException`
 - **Error handling**: media operations report every failure as `FFmpegException` via `mapIoFailures` / `nativeFailure`; never wrap `CancellationException` or `IllegalArgumentException`. Only append to `FFmpegException.Reason` (`FFmpegExceptionTest` pins the order). JNI symbol names depend on class names, so `consumer-rules.pro` keeps classes with native methods
 - **Writing outputs**: every operation that creates a file goes through `OutputDelivery` (`deliver` for one file; `Splitter` writes into a temp directory next to the outputs and publishes each with `publishFile`). Nothing ever overwrites a file; a `Uri` output (caller-owned) is written to a cache temp file and copied in with `"wt"` by `UriDelivery`. `content://` inputs are read through their file descriptor, never as paths. Android's SELinux denies hard links to app files (`AccessDeniedException`), so on Android 11+ publishing uses `renameat2`; host tests on the JVM exercise the hard-link and copy paths

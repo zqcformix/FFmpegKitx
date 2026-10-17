@@ -22,17 +22,29 @@ object FFmpeg {
         Trimmer.trim(request.input, request.output, request.range, cancellation)
     }
 
-    /** Splits the input into segments; see [SplitRequest.byDuration]. */
+    /** Splits the input into segments; see [SplitRequest.byDuration] and [SplitRequest.byRanges]. */
     suspend fun split(request: SplitRequest): SplitResult = runNative { cancellation ->
         workerThreadObserver?.invoke(Thread.currentThread())
-        Splitter.split(
-            request.input,
-            request.outputDirectory,
-            request.segmentDuration,
-            request.fileNamePrefix,
-            request.containerExtension,
-            cancellation,
-        )
+        val ranges = request.ranges
+        if (ranges != null) {
+            Splitter.splitByRanges(
+                request.input,
+                request.outputDirectory,
+                ranges,
+                request.fileNamePrefix,
+                request.containerExtension,
+                cancellation,
+            )
+        } else {
+            Splitter.split(
+                request.input,
+                request.outputDirectory,
+                request.segmentDuration!!,
+                request.fileNamePrefix,
+                request.containerExtension,
+                cancellation,
+            )
+        }
     }
 
     /**
@@ -59,11 +71,14 @@ class TrimRequest(
     val range: TimeRange,
 )
 
-/** Describes a split; create one with [byDuration]. */
+/** Describes a split; create one with [byDuration] or [byRanges]. */
 class SplitRequest private constructor(
     val input: MediaInput,
     val outputDirectory: File,
-    val segmentDuration: Duration,
+    /** Set by [byDuration], null for [byRanges]. */
+    val segmentDuration: Duration?,
+    /** Set by [byRanges], null for [byDuration]. */
+    val ranges: List<TimeRange>?,
     val fileNamePrefix: String,
     val containerExtension: String,
 ) {
@@ -86,7 +101,30 @@ class SplitRequest private constructor(
             containerExtension: String,
         ): SplitRequest {
             Splitter.validate(segmentDuration, fileNamePrefix, containerExtension)
-            return SplitRequest(input, outputDirectory, segmentDuration, fileNamePrefix, containerExtension)
+            return SplitRequest(input, outputDirectory, segmentDuration, null, fileNamePrefix, containerExtension)
+        }
+
+        /**
+         * One segment per range, `<fileNamePrefix>-0001.<containerExtension>`… numbered in the order
+         * of [ranges] (which may be in any order and may overlap). Each segment is exactly what
+         * [FFmpeg.trim] writes for its range: it starts at the keyframe at or before the range's
+         * start, so a segment usually begins before the previous range's end and adjacent segments
+         * overlap; this is not an exact cut. If any range fails, for example because it starts
+         * beyond the media, nothing is published.
+         *
+         * @throws IllegalArgumentException if [ranges] is empty or has more than 9,999 ranges,
+         *   [fileNamePrefix] is empty or contains `/`, or [containerExtension] is not letters and digits.
+         */
+        fun byRanges(
+            input: MediaInput,
+            outputDirectory: File,
+            ranges: List<TimeRange>,
+            fileNamePrefix: String,
+            containerExtension: String,
+        ): SplitRequest {
+            val copy = ranges.toList()
+            Splitter.validate(copy, fileNamePrefix, containerExtension)
+            return SplitRequest(input, outputDirectory, null, copy, fileNamePrefix, containerExtension)
         }
     }
 }
@@ -104,14 +142,21 @@ class TrimResult internal constructor(
     override fun toString(): String = "TrimResult(requested=$requestedRange, actual=$actualRange, output=$output)"
 }
 
-/** Result of [FFmpeg.split]: the published segments in time order. */
+/**
+ * Result of [FFmpeg.split]: the published segments in time order ([SplitRequest.byDuration]) or in
+ * the order of the requested ranges ([SplitRequest.byRanges]).
+ */
 class SplitResult internal constructor(val segments: List<SplitSegment>) {
     override fun toString(): String = "SplitResult($segments)"
 }
 
-/** One published segment; [actualRange] is on the input's timeline from its start. */
-class SplitSegment internal constructor(val file: File, val actualRange: TimeRange) {
-    override fun toString(): String = "SplitSegment($file, $actualRange)"
+/**
+ * One published segment; [actualRange] is on the input's timeline from its start. [requestedRange]
+ * is the range it was cut for by [SplitRequest.byRanges], null for [SplitRequest.byDuration].
+ */
+class SplitSegment internal constructor(val file: File, val actualRange: TimeRange, val requestedRange: TimeRange?) {
+    override fun toString(): String =
+        if (requestedRange == null) "SplitSegment($file, $actualRange)" else "SplitSegment($file, requested=$requestedRange, actual=$actualRange)"
 }
 
 /** Trims this file to [start, endExclusive) (to the end of the media if [endExclusive] is null) into [output]. */
@@ -141,6 +186,27 @@ suspend fun Uri.splitTo(
     containerExtension: String,
 ): SplitResult = FFmpeg.split(
     SplitRequest.byDuration(MediaInput.of(resolver, this), outputDirectory, segmentDuration, fileNamePrefix, containerExtension),
+)
+
+/** Splits this file into one segment per range; see [SplitRequest.byRanges]. */
+suspend fun File.splitTo(
+    outputDirectory: File,
+    ranges: List<TimeRange>,
+    fileNamePrefix: String,
+    containerExtension: String,
+): SplitResult = FFmpeg.split(
+    SplitRequest.byRanges(MediaInput.of(this), outputDirectory, ranges, fileNamePrefix, containerExtension),
+)
+
+/** Splits the content behind this Uri into one segment per range; see [SplitRequest.byRanges]. */
+suspend fun Uri.splitTo(
+    resolver: ContentResolver,
+    outputDirectory: File,
+    ranges: List<TimeRange>,
+    fileNamePrefix: String,
+    containerExtension: String,
+): SplitResult = FFmpeg.split(
+    SplitRequest.byRanges(MediaInput.of(resolver, this), outputDirectory, ranges, fileNamePrefix, containerExtension),
 )
 
 /** Probes this file; see [FFmpeg.probe]. */

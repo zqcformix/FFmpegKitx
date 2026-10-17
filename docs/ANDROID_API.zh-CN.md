@@ -1,6 +1,6 @@
 # Android 编辑 API 设计（M1 草案）
 
-> **状态：大部分已在 `main` 实现，尚未发布。** 已实现：`FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`、`TrimRequest`、`SplitRequest.byDuration`、`MediaInput`/`MediaOutput`、`File`/`Uri` 的 `trimTo`/`splitTo`/`probe` 扩展、`MediaInfo`/`StreamInfo`、`TimeRange`、`FFmpegException`，以及第 3、4、7、8 节的行为和协程取消。**未实现**：第 5 节的进度回调与 `MediaProgress`（路线图 5.2），因此第 5 节示例无法编译；交付复制阶段的取消（5.3）；`SplitRequest.byRanges`（2.3）；edit list 模式（2.4）。已发布的 `v1.0.3` 只包含 `FFmpegKit` 信息查询接口。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
+> **状态：大部分已在 `main` 实现，尚未发布。** 已实现：`FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`、`TrimRequest`、`SplitRequest.byDuration`/`byRanges`、`MediaInput`/`MediaOutput`、`File`/`Uri` 的 `trimTo`/`splitTo`/`probe` 扩展、`MediaInfo`/`StreamInfo`、`TimeRange`、`FFmpegException`，以及第 3、4、7、8 节的行为和协程取消。**未实现**：第 5 节的进度回调与 `MediaProgress`（路线图 5.2），因此第 5 节示例无法编译；交付复制阶段的取消（5.3）；edit list 模式（2.4）。已发布的 `v1.0.3` 只包含 `FFmpegKit` 信息查询接口。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
 
 本文是 M1 范围、行为与限制的唯一出处；其他文档只引用，不复述。
 
@@ -85,7 +85,11 @@ suspend fun splitExample(input: File, directory: File) = input.splitTo(
   - 除末段外每段 ≥ `segmentDuration`，实际长度取决于关键帧间隔；纯音频输入按包边界切分。
   - 每段的 `actualRange` 以输入起始时间为零点，取本段与下一段的切点（首段从 0 开始，末段到最后一个包结束）。切点后读到的、显示时间略早于切点的音频包属于下一段，所以各段的实际音频可能比 `actualRange` 早几十毫秒开始。
   - 编号固定四位，一次最多 9,999 段，保证文件名按文本排序即按时间排序。时长已知时，若 `segmentDuration` 可能产生超过 9,999 段（时长 / `segmentDuration` + 1），在写出任何文件前抛 `IllegalArgumentException`；时长未知时在超出时抛出并回滚。整除时不产生空段。
-- 按显式时间范围分割（路线图 2.3）使用 `SplitRequest.byRanges(...)`。各段独立 seek，相邻段可能因关键帧回退而重叠。
+- 按显式时间范围分割（路线图 2.3）使用 `SplitRequest.byRanges(input, outputDirectory, ranges, fileNamePrefix, containerExtension)`，或 `File`/`Uri` 的 `splitTo(outputDirectory, ranges, …)`。
+  - 每个范围输出一段，编号按 `ranges` 的给定顺序（不排序），范围可以乱序、重叠或重复；`SplitResult.segments` 也按此顺序，每段的 `requestedRange` 是对应的请求范围（按时长分割时为 `null`）。
+  - 每段与对第 3 节 trim 对该范围的结果完全相同（起点回退到关键帧、尾部按解码时间截止），各段独立 seek。因此**相邻范围的输出通常重叠**：例如每秒一个关键帧时，`[0, 2.5 s)` 与 `[2.5 s, 5 s)` 两段实际覆盖约 `[0, 2.567 s)` 与 `[2 s, 5.133 s)`（测试样本，30 fps、带 B 帧）。这不是精确分割；需要帧精确边界时见路线图 10.1。
+  - 至少 1 个、最多 9,999 个范围，否则在执行前抛 `IllegalArgumentException`。任一范围失败（如起点超出媒体时长报 `RANGE_OUTSIDE_MEDIA`，消息中注明是第几个范围）时整体失败，不发布任何段。命名冲突检查、临时目录、发布与回滚规则同下一条。
+  - 每个范围都重新打开输入（描述符输入从偏移 0 重读），耗时约为逐个 trim 之和。
 - 开始前检查目标目录中是否已有本次命名规则（`前缀-四位数字.扩展名`）的文件，有则报 `OUTPUT_EXISTS` 且不做任何处理。所有段先写入目标目录下的隐藏临时目录，全部成功后再逐段按第 7 节的方式发布，因此函数返回前目标目录里不会出现段文件。发布中途失败或取消时，回滚本次已发布的段；不删除既有文件或已被外部替换的文件。无法确认文件身份或清理失败时保守保留，并通过 suppressed 异常报告。
 
 ## 5. 进度与取消

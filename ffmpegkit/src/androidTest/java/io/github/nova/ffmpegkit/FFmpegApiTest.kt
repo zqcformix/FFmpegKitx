@@ -123,6 +123,16 @@ class FFmpegApiTest {
         )
     }
 
+    @Test
+    fun cancellingASplitByRangesStopsNativeWorkAndPublishesNothing() {
+        val out = File(dir, "segments").apply { mkdirs() }
+        val ranges = listOf(TimeRange(0.seconds, 3.seconds), TimeRange(3.seconds, 6.seconds), TimeRange.from(6.seconds))
+        assertCancellationStopsWork(
+            operation = { input -> FFmpeg.split(SplitRequest.byRanges(input, out, ranges, "clip", "mp4")) },
+            leftover = { out.list()!!.toSet() },
+        )
+    }
+
     /**
      * Runs [operation] on a slow, seekable descriptor (each read takes 150 ms), cancels it after the
      * second read and checks that: the coroutine ends with a plain CancellationException; no reads

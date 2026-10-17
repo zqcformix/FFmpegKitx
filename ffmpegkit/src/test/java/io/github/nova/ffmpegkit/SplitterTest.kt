@@ -9,6 +9,7 @@ import kotlin.time.Duration.Companion.nanoseconds
 import kotlin.time.Duration.Companion.seconds
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -56,6 +57,34 @@ class SplitterTest {
         assertEquals(Reason.OUTPUT_EXISTS, e.reason)
         assertTrue(e.message, e.message!!.endsWith("clip-0003.mp4"))
         assertEquals(setOf("clip-0003.mp4", "clip-final.mp4"), out.list()!!.toSet()) // no temporary directory
+    }
+
+    @Test
+    fun rejectsInvalidRangesBeforeAnyWork() {
+        val one = listOf(TimeRange.from(0.seconds))
+        assertInvalid { splitByRanges(emptyList()) }
+        assertInvalid { splitByRanges(List(Splitter.MAX_SEGMENTS + 1) { TimeRange.from(0.seconds) }) }
+        assertInvalid { splitByRanges(one, prefix = "a/b") }
+        assertInvalid { splitByRanges(one, extension = ".mp4") }
+        assertInvalid { SplitRequest.byRanges(MediaInput.of(input), out, emptyList(), "clip", "mp4") }
+        assertEquals(emptyList<String>(), out.list()!!.toList())
+    }
+
+    @Test
+    fun byRangesKeepsItsOwnCopyOfTheRanges() {
+        val ranges = mutableListOf(TimeRange(1.seconds, 2.seconds))
+        val request = SplitRequest.byRanges(MediaInput.of(input), out, ranges, "clip", "mp4")
+        ranges += TimeRange.from(0.seconds)
+        assertEquals(listOf(TimeRange(1.seconds, 2.seconds)), request.ranges)
+        assertNull(request.segmentDuration)
+    }
+
+    @Test
+    fun byRangesRefusesWhenAnyFileOfTheNamingSchemeExists() {
+        File(out, "clip-0002.mp4").writeBytes(EXISTING)
+        val e = assertThrows(FFmpegException::class.java) { splitByRanges(listOf(TimeRange.from(0.seconds))) }
+        assertEquals(Reason.OUTPUT_EXISTS, e.reason)
+        assertEquals(listOf("clip-0002.mp4"), out.list()!!.toList())
     }
 
     @Test
@@ -126,6 +155,9 @@ class SplitterTest {
 
     private fun split(segment: Duration = 1.seconds, prefix: String = "clip", extension: String = "mp4") =
         Splitter.split(input, out, segment, prefix, extension)
+
+    private fun splitByRanges(ranges: List<TimeRange>, prefix: String = "clip", extension: String = "mp4") =
+        Splitter.splitByRanges(MediaInput.of(input), out, ranges, prefix, extension)
 
     private fun assertInvalid(block: () -> Unit) {
         assertThrows(IllegalArgumentException::class.java) { block() }
