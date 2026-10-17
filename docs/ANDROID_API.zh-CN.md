@@ -7,7 +7,8 @@
 ## 1. 入口与接入
 
 - 新增 `FFmpeg` 门面承载编辑操作；现有 `FFmpegKit` 信息查询接口保持不变。原生库在首次执行编辑任务时才加载。
-- 开发期接入：`implementation(project(":ffmpegkit"))`。发布后的坐标见[发布文档](RELEASES.zh-CN.md)。
+- 开发期接入：本仓库内用 `implementation(project(":ffmpegkit"))`，外部工程用 `publishToMavenLocal` 后的本地坐标，步骤与第一个媒体任务见[本地接入](LOCAL_INTEGRATION.zh-CN.md)。发布后的坐标见[发布文档](RELEASES.zh-CN.md)。
+- 消费者要求：Kotlin 2.1 及以上（本库固定以 Kotlin 2.2 元数据发布）、compileSdk ≥ 26；本库不依赖 androidx 与资源。
 - 最低 Android API 26。M1 只提供 Kotlin 挂起函数；Java 入口见路线图 12.2。
 
 ```kotlin

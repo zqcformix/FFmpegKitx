@@ -30,6 +30,12 @@ android {
         }
 
         consumerProguardFiles("consumer-rules.pro")
+
+        aarMetadata {
+            // The public API only uses classes that exist since API 26. By default AGP 9 writes compileSdk (37)
+            // here, which forces every app that depends on this library to compile against 37.
+            minCompileSdk = rootProject.extra["minSdk"].toString().toInt()
+        }
     }
 
     buildTypes {
@@ -50,7 +56,13 @@ android {
     kotlin {
         compilerOptions {
             jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+            // Consumers' compilers read this metadata: Kotlin 2.2 metadata is readable from Kotlin 2.1 on,
+            // including AGP 9's built-in Kotlin (2.2.10). With the default 2.4 a new AGP 9 project failed to compile.
+            languageVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_2_2)
+            apiVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_2_2)
         }
+        // The kotlin-stdlib the POM asks for; kotlinx-coroutines 1.11 already needs 2.2.20.
+        coreLibrariesVersion = "2.2.20"
     }
 
     externalNativeBuild {
@@ -69,7 +81,6 @@ android {
 }
 
 dependencies {
-    implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)
 
     testImplementation(libs.junit)

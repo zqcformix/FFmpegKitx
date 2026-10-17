@@ -103,7 +103,7 @@ Sample app demonstrating library usage through the public API only — no direct
 - **Gradle**: 9.8.0 with Kotlin DSL, AGP 9.4.1; daemon JVM pinned to JetBrains JDK 17 via `gradle/gradle-daemon-jvm.properties`
 - **AGP 9 compatibility mode**: `gradle.properties` sets `android.builtInKotlin=false` and `android.newDsl=false`, so modules still apply `org.jetbrains.kotlin.android` and use the legacy `android {}` DSL (deprecation warnings expected; removed in AGP 10)
 - **Build script gotcha**: AGP 9 registers a `java` extension that shadows `java.*` packages in `build.gradle.kts` — `import` JDK classes instead of writing `java.nio.ByteBuffer` inline
-- **Kotlin**: 2.4.20, JVM target 17
+- **Kotlin**: 2.4.20, JVM target 17. The library compiles with `languageVersion`/`apiVersion` 2.2 and `coreLibrariesVersion` 2.2.20 so consumers on Kotlin 2.1+ (AGP 9's built-in 2.2.10) can read its metadata; `aarMetadata.minCompileSdk` is 26 (AGP 9 would otherwise demand compileSdk 37). Keep the library free of androidx dependencies
 - **SDK**: minSdk 26, targetSdk/compileSdk 37
 - **Version catalog**: `gradle/libs.versions.toml`
 - **Native build**: CMake 3.22.1, C++17, NDK pinned to `28.2.13676358` via `ndkVersion`, which AGP auto-installs on JitPack too (`sdk-manager` does not exist there; unpinned builds fell back to NDK r27 and shipped a 4 KB-aligned JNI lib in v1.0.2)
@@ -113,6 +113,7 @@ Sample app demonstrating library usage through the public API only — no direct
 
 - `ROADMAP.zh-CN.md` — milestones and task status; the single source for what is implemented. Editing APIs (trim/split, `FFmpeg` facade) are **designed but not implemented**. Its "当前进度与下一步" section says where work stopped and what comes next; read it when starting a session and update it when a task lands or the plan changes
 - `ANDROID_API.zh-CN.md` — M1 editing API design draft; the only place that defines M1 scope and limits
+- `LOCAL_INTEGRATION.zh-CN.md` — integrating from source (`project(":ffmpegkit")` in this repo, `publishToMavenLocal` elsewhere) and the first media task; its code is verified in a blank AGP 9 consumer project
 - `ARCHITECTURE.zh-CN.md` — layering, media semantics, upstream trade-offs
 - `RELEASES.zh-CN.md` — release checklist, platform package plan, 16 KB alignment, licensing
 - `GIT_WORKFLOW.zh-CN.md` — branching, commits, merging
