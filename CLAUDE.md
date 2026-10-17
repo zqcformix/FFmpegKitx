@@ -40,7 +40,9 @@ The publishable library. Contains all native code, FFmpeg headers, and public Ko
 ffmpegkit/src/main/
 ├── java/io/github/nova/ffmpegkit/
 │   ├── FFmpegKit.kt              # Public API: singleton object with @JvmStatic methods (info queries)
-│   ├── FFmpeg.kt                 # Public editing API: FFmpeg.trim/split, TrimRequest, SplitRequest, results, trimTo/splitTo extensions (M1 4.2)
+│   ├── FFmpeg.kt                 # Public editing API: FFmpeg.trim/split/probe, TrimRequest, SplitRequest, results, trimTo/splitTo/probe extensions (M1 4.2, 3.2)
+│   ├── MediaInfo.kt              # Public probe result: MediaInfo, StreamInfo.Video/Audio/Other; unknown values are null (M1 3.2)
+│   ├── Prober.kt                 # Internal blocking probe over probe.cpp; NativeProbeResult parsing (layout in probe.cpp)
 │   ├── Cancellation.kt           # NativeCancellation (flag shared with native) and runNative (IO dispatcher + cancel-then-wait)
 │   ├── TimeRange.kt              # [start, endExclusive) in whole microseconds; validated on construction (M1 4.1)
 │   ├── FFmpegException.kt        # Public error type with frozen, append-only Reason enum (M1 4.3)
@@ -58,6 +60,7 @@ ffmpegkit/src/main/
 │   ├── remux.h / remux.cpp        # Shared stream copy: open input (path or seekable fd via custom AVIOContext) + stream selection, output creation, rebased writes, JNI status
 │   ├── trim.cpp                   # Stream-copy trim: keyframe anchor, per-stream dts end
 │   ├── split.cpp                  # Single-pass split: cut at the first reference keyframe ≥ segment start + duration
+│   ├── probe.cpp                  # Structured probe after avformat_find_stream_info (no decoding); bit-rate-estimated durations → unknown
 │   ├── inspect.cpp                # Full decode summary and per-packet hashes used to verify outputs
 │   ├── files.cpp                  # renameat2(RENAME_NOREPLACE) via dlsym (libc has it from API 30; never the raw syscall)
 │   ├── jni_util.h                 # Paths cross JNI as UTF-8 byte arrays (not modified UTF-8 strings)
@@ -65,7 +68,7 @@ ffmpegkit/src/main/
 └── jniLibs/{arm64-v8a,armeabi-v7a,x86_64}/  # FFmpeg .so files (committed, bundled in AAR)
 ```
 
-- **Public API**: `FFmpegKit` object — `getVersion()`, `getBuildConfiguration()`, `checkLibassAvailability()`, `isLibassAvailable()`, `printInfo()` (released). Unreleased on `main`: `FFmpeg.trim`/`FFmpeg.split`, `TrimRequest`, `SplitRequest.byDuration`, `MediaInput`, `MediaOutput`, `TrimResult`/`SplitResult`/`SplitSegment`, `TimeRange`, `FFmpegException`, `File`/`Uri` `trimTo`/`splitTo`. README documents only released API, so it is updated at the next release
+- **Public API**: `FFmpegKit` object — `getVersion()`, `getBuildConfiguration()`, `checkLibassAvailability()`, `isLibassAvailable()`, `printInfo()` (released). Unreleased on `main`: `FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`, `TrimRequest`, `SplitRequest.byDuration`, `MediaInput`, `MediaOutput`, `TrimResult`/`SplitResult`/`SplitSegment`, `MediaInfo`/`StreamInfo`, `TimeRange`, `FFmpegException`, `File`/`Uri` `trimTo`/`splitTo`/`probe`. README documents only released API, so it is updated at the next release
 - **Cancellation**: every editing call runs through `runNative`; native loops and FFmpeg's `interrupt_callback` poll the `NativeCancellation` flag, and Kotlin calls `throwIfCancelled()` before publishing. Work cancelled this way must end as `CancellationException`, never `FFmpegException`
 - **Error handling**: media operations report every failure as `FFmpegException` via `mapIoFailures` / `nativeFailure`; never wrap `CancellationException` or `IllegalArgumentException`. Only append to `FFmpegException.Reason` (`FFmpegExceptionTest` pins the order). JNI symbol names depend on class names, so `consumer-rules.pro` keeps classes with native methods
 - **Writing outputs**: every operation that creates a file goes through `OutputDelivery` (`deliver` for one file; `Splitter` writes into a temp directory next to the outputs and publishes each with `publishFile`). Nothing ever overwrites a file; a `Uri` output (caller-owned) is written to a cache temp file and copied in with `"wt"` by `UriDelivery`. `content://` inputs are read through their file descriptor, never as paths. Android's SELinux denies hard links to app files (`AccessDeniedException`), so on Android 11+ publishing uses `renameat2`; host tests on the JVM exercise the hard-link and copy paths
@@ -79,7 +82,7 @@ ffmpegkit/src/main/
 
 Sample app demonstrating library usage through the public API only — no direct JNI or `System.loadLibrary()`. Two tabs:
 
-- **Edit** (`editor/`): pick a video with the system file picker (`ACTION_OPEN_DOCUMENT`) or the photo picker, trim or split it, save to `Movies/FFmpegKit`. `Gallery` writes MediaStore items as pending and deletes them on failure or cancellation (Android 10+; split goes through a cache directory, then is copied in); Android 8–9 writes the public Movies directory with `WRITE_EXTERNAL_STORAGE` and the media scanner. Each run logs a report under tag `FFmpegKitDemo` (picker, input Uri authority, requested and actual ranges), also copyable from the UI — the evidence format for roadmap 3.1's picker tests
+- **Edit** (`editor/`): pick a video with the system file picker (`ACTION_OPEN_DOCUMENT`) or the photo picker, show its `FFmpeg.probe` result, trim or split it, save to `Movies/FFmpegKit`. `Gallery` writes MediaStore items as pending and deletes them on failure or cancellation (Android 10+; split goes through a cache directory, then is copied in); Android 8–9 writes the public Movies directory with `WRITE_EXTERNAL_STORAGE` and the media scanner. Each run logs a report under tag `FFmpegKitDemo` (picker, input Uri authority, probe result, requested and actual ranges), also copyable from the UI — the evidence format for roadmap 3.1's picker tests
 - **FFmpeg info**: `FFmpegKit.getVersion()` etc.
 
 ## FFmpeg Integration

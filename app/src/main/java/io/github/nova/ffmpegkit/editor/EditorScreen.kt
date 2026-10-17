@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.compose.AsyncImage
+import io.github.nova.ffmpegkit.StreamInfo
 import io.github.nova.ffmpegkit.TimeRange
 import java.util.Locale
 import kotlin.math.roundToLong
@@ -148,6 +149,8 @@ private fun SourceDetails(source: VideoSource) {
             Text(source.displayName ?: "(no name)", style = MaterialTheme.typography.titleSmall)
             Detail("${source.mimeType ?: "unknown type"} · ${source.sizeBytes?.let { Formatter.formatFileSize(context, it) } ?: "unknown size"}")
             Detail("Duration ${source.duration?.let(::formatSeconds)?.plus(" s") ?: "unknown"}")
+            source.info?.streams?.forEach { Detail(describe(it)) }
+            source.probeError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
         }
     }
     Detail("${source.picker.label}\n${source.uri}")
@@ -297,6 +300,17 @@ private fun SecondsField(label: String, value: String, enabled: Boolean, modifie
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
         modifier = modifier,
     )
+}
+
+private fun describe(stream: StreamInfo): String = when (stream) {
+    is StreamInfo.Video -> buildString {
+        append("#${stream.index} ${stream.codecName} ${stream.width ?: "?"}×${stream.height ?: "?"}")
+        stream.frameRate?.let { append(String.format(Locale.ROOT, " · %.2f fps", it)) }
+        if (stream.rotation != 0) append(" · rotated ${stream.rotation ?: "?"}°")
+        if (stream.isAttachedPicture) append(" · cover")
+    }
+    is StreamInfo.Audio -> "#${stream.index} ${stream.codecName} · ${stream.sampleRate ?: "?"} Hz · ${stream.channelLayout ?: "${stream.channels ?: "?"} ch"}"
+    is StreamInfo.Other -> "#${stream.index} ${stream.mediaType} ${stream.codecName}"
 }
 
 /** Seconds with millisecond precision; null for anything that is not a finite number. */

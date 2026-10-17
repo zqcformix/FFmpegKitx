@@ -1,7 +1,6 @@
 package io.github.nova.ffmpegkit.editor
 
 import android.app.Application
-import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.provider.OpenableColumns
@@ -12,6 +11,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.nova.ffmpegkit.FFmpeg
 import io.github.nova.ffmpegkit.FFmpegException
+import io.github.nova.ffmpegkit.MediaInfo
 import io.github.nova.ffmpegkit.MediaInput
 import io.github.nova.ffmpegkit.SplitRequest
 import io.github.nova.ffmpegkit.TimeRange
@@ -29,7 +29,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.time.Duration
-import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.TimeSource
 
 /** Where the input came from; recorded in the report because each picker hands out different Uris. */
@@ -38,15 +37,19 @@ enum class Picker(val label: String) {
     PHOTOS("Photo picker"),
 }
 
-/** The picked input as its provider describes it. Unknown values stay null. */
+/** The picked input as its provider and [FFmpeg.probe] describe it. Unknown values stay null. */
 class VideoSource(
     val uri: Uri,
     val picker: Picker,
     val displayName: String?,
     val mimeType: String?,
     val sizeBytes: Long?,
-    val duration: Duration?,
+    /** Null when probing failed; see [probeError]. */
+    val info: MediaInfo?,
+    val probeError: String?,
 ) {
+    val duration: Duration? get() = info?.duration
+
     /** Container of the outputs: the input's own, since stream copy keeps the codecs. */
     val extension: String =
         mimeType?.let { MimeTypeMap.getSingleton().getExtensionFromMimeType(it) }
@@ -155,7 +158,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private fun describe(uri: Uri, picker: Picker): VideoSource {
+    private suspend fun describe(uri: Uri, picker: Picker): VideoSource {
         var displayName: String? = null
         var size: Long? = null
         resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use {
@@ -164,19 +167,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 size = if (it.isNull(1)) null else it.getLong(1)
             }
         }
-        return VideoSource(uri, picker, displayName, resolver.getType(uri), size, readDuration(uri))
-    }
-
-    private fun readDuration(uri: Uri): Duration? {
-        val retriever = MediaMetadataRetriever()
-        return try {
-            retriever.setDataSource(getApplication(), uri)
-            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.milliseconds
-        } catch (e: RuntimeException) {
-            null
-        } finally {
-            retriever.release()
+        // Probing first tells whether trim and split can read the input at all.
+        val (info, error) = try {
+            FFmpeg.probe(MediaInput.of(resolver, uri)) to null
+        } catch (e: FFmpegException) {
+            null to "${e.reason}: ${e.message}"
         }
+        return VideoSource(uri, picker, displayName, resolver.getType(uri), size, info, error)
     }
 
     private fun report(source: VideoSource, operation: String, elapsed: Duration, outcome: String): String = buildString {
@@ -185,7 +182,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (source.picker == Picker.PHOTOS) append(", photo picker available=${PickVisualMedia.isPhotoPickerAvailable(getApplication())}")
         appendLine()
         appendLine("input: ${source.uri} (authority ${source.uri.authority})")
-        appendLine("  name=${source.displayName}, mime=${source.mimeType}, size=${source.sizeBytes}, duration=${source.duration}")
+        appendLine("  name=${source.displayName}, mime=${source.mimeType}, size=${source.sizeBytes}")
+        appendLine("  probe: ${source.info ?: source.probeError}")
         appendLine("$operation, container=${source.extension}, elapsed=$elapsed")
         append(outcome)
     }

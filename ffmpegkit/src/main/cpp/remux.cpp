@@ -87,7 +87,7 @@ void Output::Reset() {
     ctx = nullptr;
 }
 
-Status OpenInput(const Source& source, const Cancellation* cancellation, Input* input) {
+Status OpenFormat(const Source& source, const Cancellation* cancellation, Input* input) {
     if (cancellation->IsCancelled()) return Cancelled();
     input->ctx = avformat_alloc_context();
     if (input->ctx == nullptr) return Failure(AVERROR(ENOMEM), false, "allocate input context");
@@ -118,7 +118,13 @@ Status OpenInput(const Source& source, const Cancellation* cancellation, Input* 
     ret = avformat_find_stream_info(input->ctx, nullptr);
     if (ret == AVERROR_EXIT || cancellation->IsCancelled()) return Cancelled();
     if (ret < 0) return Failure(ret, false, "read stream info");
+    input->origin = input->ctx->start_time == AV_NOPTS_VALUE ? 0 : input->ctx->start_time;
+    return {};
+}
 
+Status OpenInput(const Source& source, const Cancellation* cancellation, Input* input) {
+    Status status = OpenFormat(source, cancellation, input);
+    if (status.failed()) return status;
     input->tracks.assign(input->ctx->nb_streams, Track{});
     int selected = 0;
     for (unsigned i = 0; i < input->ctx->nb_streams; ++i) {
@@ -138,7 +144,6 @@ Status OpenInput(const Source& source, const Cancellation* cancellation, Input* 
         input->tracks[i].output_index = selected++;
     }
     if (selected == 0) return Rejected(kReasonUnsupportedMedia, false, "no audio or video stream");
-    input->origin = input->ctx->start_time == AV_NOPTS_VALUE ? 0 : input->ctx->start_time;
     return {};
 }
 
