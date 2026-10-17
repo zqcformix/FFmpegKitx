@@ -39,15 +39,19 @@ The publishable library. Contains all native code, FFmpeg headers, and public Ko
 ffmpegkit/src/main/
 ├── java/io/github/nova/ffmpegkit/
 │   ├── FFmpegKit.kt              # Public API: singleton object with @JvmStatic methods
-│   └── TimeRange.kt              # [start, endExclusive) in whole microseconds; validated on construction (M1 4.1)
+│   ├── TimeRange.kt              # [start, endExclusive) in whole microseconds; validated on construction (M1 4.1)
+│   ├── FFmpegException.kt        # Public error type with frozen, append-only Reason enum (M1 4.3)
+│   └── ErrorMapping.kt           # Internal: AVERROR/errno → Reason table, mapIoFailures, nativeFailure
 ├── cpp/
 │   ├── CMakeLists.txt             # CMake config, imports FFmpeg as SHARED IMPORTED
 │   ├── native-lib.cpp             # JNI implementation (maps to FFmpegKit object methods)
+│   ├── errors.cpp                 # JNI for NativeErrors: av_strerror text and AVERROR constants
 │   └── libav*/libsw*/             # FFmpeg C headers (compile-time only)
 └── jniLibs/{arm64-v8a,armeabi-v7a,x86_64}/  # FFmpeg .so files (committed, bundled in AAR)
 ```
 
-- **Public API**: `FFmpegKit` object — `getVersion()`, `getBuildConfiguration()`, `checkLibassAvailability()`, `isLibassAvailable()`, `printInfo()`; `TimeRange` (unreleased, not yet used by any operation)
+- **Public API**: `FFmpegKit` object — `getVersion()`, `getBuildConfiguration()`, `checkLibassAvailability()`, `isLibassAvailable()`, `printInfo()`; `TimeRange` and `FFmpegException` (unreleased, not yet used by any operation)
+- **Error handling**: media operations report every failure as `FFmpegException` via `mapIoFailures` / `nativeFailure`; never wrap `CancellationException` or `IllegalArgumentException`. Only append to `FFmpegException.Reason` (`FFmpegExceptionTest` pins the order). JNI symbol names depend on class names, so `consumer-rules.pro` keeps classes with native methods
 - **Unit tests**: host tests in `ffmpegkit/src/test` (`:ffmpegkit:testDebugUnitTest`)
 - **Instrumented tests**: `ffmpegkit/src/androidTest` (`:ffmpegkit:connectedDebugAndroidTest`, needs a device or emulator). `PackagedLibrariesTest` pins the FFmpeg version, library versions and configure flags that README documents — change README and the test together when the prebuilt .so files change
 - **JNI naming**: `Java_io_github_nova_ffmpegkit_FFmpegKit_methodName` (maps to `FFmpegKit` object, not Activity)
