@@ -23,11 +23,11 @@ using remux::ToMicros;
 
 class Trimmer {
 public:
-    Trimmer(std::string input, std::string output, int64_t start_us, int64_t end_us)
-        : input_path_(std::move(input)), output_path_(std::move(output)), start_us_(start_us), end_us_(end_us) {}
+    Trimmer(remux::Source input, std::string output, int64_t start_us, int64_t end_us)
+        : input_(std::move(input)), output_path_(std::move(output)), start_us_(start_us), end_us_(end_us) {}
 
     Status Run() {
-        Status s = remux::OpenInput(input_path_, &in_);
+        Status s = remux::OpenInput(input_, &in_);
         if (s.failed()) return s;
         if (in_.ctx->duration != AV_NOPTS_VALUE && in_.ctx->duration > 0 && start_us_ >= in_.ctx->duration) {
             return Rejected(remux::kReasonRangeOutsideMedia, false, "start is at or beyond the end of the media");
@@ -205,7 +205,7 @@ private:
         return remux::CloseOutput(&out_);
     }
 
-    const std::string input_path_;
+    const remux::Source input_;
     const std::string output_path_;
     const int64_t start_us_;
     const int64_t end_us_;
@@ -228,16 +228,18 @@ private:
 
 }  // namespace
 
+// Reads from `input_path` (UTF-8 bytes) or, when `input_fd` >= 0, from that descriptor.
 // Returns a NativeRemuxStatus whose times are [actual start, actual end) in microseconds.
 extern "C" JNIEXPORT jobject JNICALL
 Java_io_github_nova_ffmpegkit_NativeTrim_trim(
         JNIEnv* env,
         jobject /* this */,
-        jbyteArray input,
+        jbyteArray input_path,
+        jint input_fd,
         jbyteArray output,
         jlong start_us,
         jlong end_us) {
-    Trimmer trimmer(ToUtf8Path(env, input), ToUtf8Path(env, output), start_us, end_us);
+    Trimmer trimmer(remux::ToSource(env, input_path, input_fd), ToUtf8Path(env, output), start_us, end_us);
     const Status status = trimmer.Run();
     std::vector<int64_t> times;
     if (!status.failed()) times = {trimmer.actual_start_us(), trimmer.actual_end_us()};

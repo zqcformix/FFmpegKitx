@@ -33,6 +33,14 @@ internal object Splitter {
         segmentDuration: Duration,
         fileNamePrefix: String,
         containerExtension: String,
+    ): SplitResult = split(MediaInput.of(input), outputDirectory, segmentDuration, fileNamePrefix, containerExtension)
+
+    fun split(
+        input: MediaInput,
+        outputDirectory: File,
+        segmentDuration: Duration,
+        fileNamePrefix: String,
+        containerExtension: String,
     ): SplitResult {
         require(segmentDuration.isPositive() && segmentDuration.isFinite()) {
             "segmentDuration must be positive and finite: $segmentDuration"
@@ -61,20 +69,23 @@ internal object Splitter {
         }
         var failure: Throwable? = null
         try {
-            val status = NativeSplit.split(
-                input.path.toByteArray(),
-                workDirectory.path.toByteArray(),
-                containerExtension.toByteArray(),
-                segmentDuration.inWholeMicroseconds,
-                MAX_SEGMENTS,
-            )
-            if (status.failed) throw status.toException(input, outputDirectory)
+            val status = input.open().use { opened ->
+                NativeSplit.split(
+                    opened.path?.toByteArray(),
+                    opened.fd,
+                    workDirectory.path.toByteArray(),
+                    containerExtension.toByteArray(),
+                    segmentDuration.inWholeMicroseconds,
+                    MAX_SEGMENTS,
+                )
+            }
+            if (status.failed) throw status.toException(input.description, outputDirectory.path)
             val count = status.timesUs.size / 2
             val files = (1..count).map { index ->
                 File(workDirectory, number(index) + "." + containerExtension) to
                     File(outputDirectory, fileNamePrefix + "-" + number(index) + "." + containerExtension)
             }
-            SegmentPublisher.publishAll(input, files)
+            SegmentPublisher.publishAll(input.file, files)
             return SplitResult(
                 files.mapIndexed { i, (_, target) ->
                     SplitSegment(target, TimeRange(status.timesUs[2 * i].microseconds, status.timesUs[2 * i + 1].microseconds))
@@ -102,7 +113,7 @@ internal object SegmentPublisher {
      * rethrows; targets that cannot be confirmed stay and are reported as suppressed exceptions.
      */
     fun publishAll(
-        input: File,
+        input: File?,
         files: List<Pair<File, File>>,
         publish: (temp: File, target: File) -> Unit = { temp, target -> OutputDelivery.publishFile(temp, target) },
         identity: (File) -> Any? = OutputDelivery::identityOf,
@@ -133,12 +144,13 @@ internal object NativeSplit {
     }
 
     /**
-     * Writes `0001.<extension>`, `0002.<extension>`… into [directory]. Paths are UTF-8 bytes. Times:
-     * one [start, end) pair per segment.
+     * Reads [inputPath] or, when [inputFd] >= 0, that descriptor, and writes `0001.<extension>`,
+     * `0002.<extension>`… into [directory]. Paths are UTF-8 bytes. Times: one [start, end) pair per segment.
      */
     @JvmStatic
     external fun split(
-        input: ByteArray,
+        inputPath: ByteArray?,
+        inputFd: Int,
         directory: ByteArray,
         extension: ByteArray,
         segmentUs: Long,

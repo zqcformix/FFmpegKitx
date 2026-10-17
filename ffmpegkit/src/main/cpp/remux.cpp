@@ -1,8 +1,53 @@
 #include "remux.h"
 
 #include <cerrno>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "jni_util.h"
 
 namespace remux {
+
+namespace {
+
+constexpr int kIoBufferSize = 64 * 1024;
+
+int ReadFd(void* opaque, uint8_t* buffer, int size) {
+    const int fd = static_cast<int>(reinterpret_cast<intptr_t>(opaque));
+    ssize_t n;
+    do {
+        n = read(fd, buffer, size);
+    } while (n < 0 && errno == EINTR);
+    if (n == 0) return AVERROR_EOF;
+    return n < 0 ? AVERROR(errno) : static_cast<int>(n);
+}
+
+int64_t SeekFd(void* opaque, int64_t offset, int whence) {
+    const int fd = static_cast<int>(reinterpret_cast<intptr_t>(opaque));
+    if (whence == AVSEEK_SIZE) {
+        struct stat st {};
+        return fstat(fd, &st) == 0 && S_ISREG(st.st_mode) ? st.st_size : AVERROR(ENOSYS);
+    }
+    const off_t position = lseek(fd, offset, whence & ~AVSEEK_FORCE);
+    return position < 0 ? AVERROR(errno) : position;
+}
+
+}  // namespace
+
+Input::~Input() {
+    avformat_close_input(&ctx);  // with AVFMT_FLAG_CUSTOM_IO this leaves `io` to us
+    if (io != nullptr) {
+        av_freep(&io->buffer);
+        avio_context_free(&io);
+    }
+}
+
+Source ToSource(JNIEnv* env, jbyteArray path, jint fd) {
+    Source source;
+    if (path != nullptr) source.path = ToUtf8Path(env, path);
+    source.fd = fd;
+    return source;
+}
 
 Status Failure(int code, bool output_side, std::string detail) {
     Status s;
@@ -25,8 +70,30 @@ void Output::Reset() {
     ctx = nullptr;
 }
 
-Status OpenInput(const std::string& path, Input* input) {
-    int ret = avformat_open_input(&input->ctx, path.c_str(), nullptr, nullptr);
+Status OpenInput(const Source& source, Input* input) {
+    int ret;
+    if (source.fd >= 0) {
+        // Pipes and some provider streams cannot seek; M1 needs seeking (keyframe search, MP4 index).
+        if (lseek(source.fd, 0, SEEK_SET) < 0) {
+            const int error = AVERROR(errno);
+            return Rejected(kReasonUnsupportedMedia, false, "input cannot seek (pipe or stream)", error);
+        }
+        auto* buffer = static_cast<unsigned char*>(av_malloc(kIoBufferSize));
+        if (buffer == nullptr) return Failure(AVERROR(ENOMEM), false, "allocate input buffer");
+        input->io = avio_alloc_context(buffer, kIoBufferSize, 0, reinterpret_cast<void*>(static_cast<intptr_t>(source.fd)),
+                                       ReadFd, nullptr, SeekFd);
+        if (input->io == nullptr) {
+            av_free(buffer);
+            return Failure(AVERROR(ENOMEM), false, "allocate input context");
+        }
+        input->ctx = avformat_alloc_context();
+        if (input->ctx == nullptr) return Failure(AVERROR(ENOMEM), false, "allocate input context");
+        input->ctx->pb = input->io;
+        input->ctx->flags |= AVFMT_FLAG_CUSTOM_IO;
+        ret = avformat_open_input(&input->ctx, nullptr, nullptr, nullptr);  // frees ctx on failure
+    } else {
+        ret = avformat_open_input(&input->ctx, source.path.c_str(), nullptr, nullptr);
+    }
     if (ret < 0) return Failure(ret, false, "open input");
     ret = avformat_find_stream_info(input->ctx, nullptr);
     if (ret < 0) return Failure(ret, false, "read stream info");

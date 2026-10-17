@@ -43,7 +43,8 @@ ffmpegkit/src/main/
 │   ├── TimeRange.kt              # [start, endExclusive) in whole microseconds; validated on construction (M1 4.1)
 │   ├── FFmpegException.kt        # Public error type with frozen, append-only Reason enum (M1 4.3)
 │   ├── ErrorMapping.kt           # Internal: AVERROR/errno → Reason table, mapIoFailures, nativeFailure
-│   ├── Trimmer.kt                # Internal blocking fast trim (File → File) over trim.cpp (M1 2.1)
+│   ├── MediaIo.kt                # Internal MediaInput (File / content Uri / ParcelFileDescriptor) and MediaOutput (File / Uri); UriDelivery (M1 3.1)
+│   ├── Trimmer.kt                # Internal blocking fast trim (MediaInput → MediaOutput) over trim.cpp (M1 2.1)
 │   ├── Splitter.kt               # Internal blocking keyframe-aligned split over split.cpp; SegmentPublisher rollback (M1 2.2)
 │   ├── NativeRemux.kt            # NativeRemuxStatus: JNI result of trim/split → FFmpegException / IllegalArgumentException
 │   ├── OutputDelivery.kt         # Temp file + no-overwrite publish: renameat2 NOREPLACE → hard link → CREATE_NEW copy (M1 2.5)
@@ -52,7 +53,7 @@ ffmpegkit/src/main/
 │   ├── CMakeLists.txt             # CMake config, imports FFmpeg as SHARED IMPORTED
 │   ├── native-lib.cpp             # JNI implementation (maps to FFmpegKit object methods)
 │   ├── errors.cpp                 # JNI for NativeErrors: av_strerror text and AVERROR constants
-│   ├── remux.h / remux.cpp        # Shared stream copy: open input + stream selection, output creation, rebased writes, JNI status
+│   ├── remux.h / remux.cpp        # Shared stream copy: open input (path or seekable fd via custom AVIOContext) + stream selection, output creation, rebased writes, JNI status
 │   ├── trim.cpp                   # Stream-copy trim: keyframe anchor, per-stream dts end
 │   ├── split.cpp                  # Single-pass split: cut at the first reference keyframe ≥ segment start + duration
 │   ├── inspect.cpp                # Full decode summary and per-packet hashes used to verify outputs
@@ -64,9 +65,9 @@ ffmpegkit/src/main/
 
 - **Public API**: `FFmpegKit` object — `getVersion()`, `getBuildConfiguration()`, `checkLibassAvailability()`, `isLibassAvailable()`, `printInfo()`; `TimeRange` and `FFmpegException` (unreleased, not yet used by any operation)
 - **Error handling**: media operations report every failure as `FFmpegException` via `mapIoFailures` / `nativeFailure`; never wrap `CancellationException` or `IllegalArgumentException`. Only append to `FFmpegException.Reason` (`FFmpegExceptionTest` pins the order). JNI symbol names depend on class names, so `consumer-rules.pro` keeps classes with native methods
-- **Writing outputs**: every operation that creates a file goes through `OutputDelivery` (`deliver` for one file; `Splitter` writes into a temp directory next to the outputs and publishes each with `publishFile`). Nothing ever overwrites. Android's SELinux denies hard links to app files (`AccessDeniedException`), so on Android 11+ publishing uses `renameat2`; host tests on the JVM exercise the hard-link and copy paths
+- **Writing outputs**: every operation that creates a file goes through `OutputDelivery` (`deliver` for one file; `Splitter` writes into a temp directory next to the outputs and publishes each with `publishFile`). Nothing ever overwrites a file; a `Uri` output (caller-owned) is written to a cache temp file and copied in with `"wt"` by `UriDelivery`. `content://` inputs are read through their file descriptor, never as paths. Android's SELinux denies hard links to app files (`AccessDeniedException`), so on Android 11+ publishing uses `renameat2`; host tests on the JVM exercise the hard-link and copy paths
 - **Unit tests**: host tests in `ffmpegkit/src/test` (`:ffmpegkit:testDebugUnitTest`)
-- **Instrumented tests**: `ffmpegkit/src/androidTest` (`:ffmpegkit:connectedDebugAndroidTest`, needs a device or emulator). `PackagedLibrariesTest` pins the FFmpeg version, library versions and configure flags that README documents — change README and the test together when the prebuilt .so files change. Media tests use the samples in `ffmpegkit/src/androidTest/assets/media/`; their expected ranges and packet counts come from `ffprobe -show_packets`, so recompute them if the samples are regenerated. `-e keepOutputs true` keeps `TrimTest`/`SplitTest` outputs in the test app's cache for pulling with `run-as` (install the test APK with `adb install -t`, run with `am instrument`). Xiaomi devices ask to confirm every test APK install; a cancelled install still ends in `BUILD SUCCESSFUL` with no tests run, so check the result XML
+- **Instrumented tests**: `ffmpegkit/src/androidTest` (`:ffmpegkit:connectedDebugAndroidTest`, needs a device or emulator). `PackagedLibrariesTest` pins the FFmpeg version, library versions and configure flags that README documents — change README and the test together when the prebuilt .so files change. Media tests use the samples in `ffmpegkit/src/androidTest/assets/media/`; their expected ranges and packet counts come from `ffprobe -show_packets`, so recompute them if the samples are regenerated. `-e keepOutputs true` keeps `TrimTest`/`SplitTest` outputs in the test app's cache for pulling with `run-as` (install the test APK with `adb install -t`, run with `am instrument`). Xiaomi devices ask to confirm every test APK install; a cancelled install still ends in `BUILD SUCCESSFUL` with no tests run, so check the result XML. Unattended runs: boot AVD `375x812_Unit_IN` (x86_64, API 35) and set `ANDROID_SERIAL=emulator-5554`. `MediaUriTest` inserts and deletes its own MediaStore items under `Movies/FFmpegKitTest` (API 29+, no permission needed)
 - **JNI naming**: `Java_io_github_nova_ffmpegkit_FFmpegKit_methodName` (maps to `FFmpegKit` object, not Activity)
 - **maven-publish** plugin configured for JitPack (`groupId: com.github.zqcformix`, `artifactId: ffmpegkit`)
 - **consumer-rules.pro**: keeps `FFmpegKit`, classes with native methods, and the JNI-constructed `NativeRemuxStatus`

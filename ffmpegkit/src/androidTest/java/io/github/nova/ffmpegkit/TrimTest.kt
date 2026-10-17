@@ -79,7 +79,7 @@ class TrimTest {
     fun videoOnly() {
         val result = Trimmer.trim(sample(VIDEO), out("clip.mp4"), TimeRange(1_200.milliseconds, 2_200.milliseconds))
         assertEquals(TimeRange(1.seconds, 2_300_000.microseconds), result.actualRange)
-        val video = MediaInspector.inspect(result.output).streams.single()
+        val video = MediaInspector.inspect(result.file).streams.single()
         assertTrue(video.isVideo)
         assertDecodable(video, packets = 38)
         assertEquals(2, video.keyframes)
@@ -90,7 +90,7 @@ class TrimTest {
         val result = Trimmer.trim(sample(AUDIO), out("clip.m4a"), TimeRange(2_500.milliseconds, 4_500.milliseconds))
         // Packet 107 (pts 109568/44100 s) contains 2.5 s; packet 193 is the last one starting before 4.5 s.
         assertEquals(TimeRange(2_484_535.microseconds, 4_504_671.microseconds), result.actualRange)
-        val audio = MediaInspector.inspect(result.output).streams.single()
+        val audio = MediaInspector.inspect(result.file).streams.single()
         assertTrue(audio.isAudio)
         assertDecodable(audio, packets = 87)
     }
@@ -106,7 +106,7 @@ class TrimTest {
     fun unicodeAndSpacesInPaths() {
         val input = sample(AV).let { original -> File(dir, "输入 视频 🎬.mp4").also { original.renameTo(it) } }
         val result = Trimmer.trim(input, out("输出 片段 ✂️.mp4"), TimeRange(3.seconds, 4.seconds))
-        assertTrue(result.output.length() > 0)
+        assertTrue(result.file.length() > 0)
         assertAudioVideo(result, videoPackets = 32, keyframes = 2, audioPackets = 43)
     }
 
@@ -235,7 +235,7 @@ class TrimTest {
     }
 
     private fun assertAudioVideo(result: TrimResult, videoPackets: Long, keyframes: Long, audioPackets: Long) {
-        val media = MediaInspector.inspect(result.output)
+        val media = MediaInspector.inspect(result.file)
         assertEquals(media.toString(), 2, media.streams.size)
         val video = media.streams.single { it.isVideo }
         val audio = media.streams.single { it.isAudio }
@@ -265,6 +265,8 @@ class TrimTest {
     }
 
     private fun out(name: String) = File(dir, "out-$name")
+
+    private val TrimResult.file: File get() = (output as MediaOutput.ToFile).file
 
     private companion object {
         const val AV = "av_h264_aac.mp4"
