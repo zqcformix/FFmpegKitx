@@ -28,6 +28,7 @@ set_target_properties(swscale PROPERTIES IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/lib
 add_library(${CMAKE_PROJECT_NAME} SHARED
     native-lib.cpp
     errors.cpp
+    remux.cpp
     trim.cpp
     inspect.cpp
     files.cpp)
