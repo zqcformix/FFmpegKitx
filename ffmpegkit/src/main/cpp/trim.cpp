@@ -42,10 +42,14 @@ public:
         s = remux::OpenOutput(in_, output_path_, cancellation_, &out_);
         if (s.failed()) return s;
         if (start_us_ > 0) {
-            // Lands on the last keyframe at or before the start; reading from the beginning is also
-            // correct (packets before the start are dropped), only slower.
+            // With an index (MP4, Matroska) this lands on the last keyframe at or before the start.
+            // Reading from the beginning is also correct (packets before the start are dropped), only slower.
             int ret = avformat_seek_file(in_.ctx, -1, INT64_MIN, start_abs_, start_abs_, 0);
-            if (ret < 0) __android_log_print(ANDROID_LOG_WARN, TAG, "seek failed (%d), reading from the start", ret);
+            if (ret < 0) {
+                __android_log_print(ANDROID_LOG_WARN, TAG, "seek failed (%d), reading from the start", ret);
+            } else {
+                from_beginning_ = false;
+            }
         }
         s = CopyPackets();
         if (s.failed()) return s;
@@ -62,7 +66,16 @@ private:
         while (!AllFinished()) {
             if (cancellation_->IsCancelled()) return remux::Cancelled();
             int ret = av_read_frame(in_.ctx, packet.get());
-            if (ret == AVERROR_EOF) break;
+            if (ret == AVERROR_EOF) {
+                // A seek can also land after the last keyframe (or audio packet) the start needs.
+                const bool found_start = in_.has_video ? has_candidate_ : seen_before_start_;
+                if (!anchored_ && !found_start && !from_beginning_) {
+                    Status retry = SeekEarlier();
+                    if (retry.failed()) return retry;
+                    continue;
+                }
+                break;
+            }
             if (ret == AVERROR_EXIT) return remux::Cancelled();
             if (ret < 0) return Failure(ret, false, "read input");
             if (in_.tracks[packet->stream_index].output_index < 0) {
@@ -74,6 +87,10 @@ private:
             if (!packet) return Failure(AVERROR(ENOMEM), false, "allocate packet");
             av_packet_unref(packet.get());
             if (ret < 0) return Failure(ret, true, "write output");
+            if (overshot_) {
+                Status retry = SeekEarlier();
+                if (retry.failed()) return retry;
+            }
         }
         if (!anchored_) {
             // End of input while looking for the start.
@@ -102,6 +119,11 @@ private:
         if (!in_.has_video) {
             if (packet->pts == AV_NOPTS_VALUE ||
                 ToMicros(packet->pts + packet->duration, st->time_base) <= start_abs_) {
+                seen_before_start_ = true;
+                return 0;
+            }
+            if (!seen_before_start_ && ToMicros(packet->pts, st->time_base) > start_abs_ && !from_beginning_) {
+                overshot_ = true;  // the packet holding the start was skipped
                 return 0;
             }
             SetAnchor(packet->pts, st->time_base);
@@ -126,7 +148,13 @@ private:
         }
         if (!has_candidate_) {
             if (!keyframe) return 0;  // cannot decode without the preceding keyframe
-            SetAnchor(packet->pts, st->time_base);  // the first keyframe is already past the start
+            if (!from_beginning_) {
+                // The seek landed after the keyframe the start needs (MPEG-TS and other inputs without
+                // an index seek to a byte position, not to a keyframe).
+                overshot_ = true;
+                return 0;
+            }
+            SetAnchor(packet->pts, st->time_base);  // the input's first keyframe is already past the start
             has_candidate_ = true;
             pending_.push_back(std::move(packet));
             return Flush();
@@ -135,6 +163,25 @@ private:
         pending_.push_back(std::move(packet));
         if ((keyframe && pts_abs > start_abs_) || decode_abs >= start_abs_) return Flush();
         return 0;
+    }
+
+    // After an overshooting seek: seeks again 1, 2, 4… s before the start, and finally to the beginning
+    // of the input, where a first keyframe after the start is genuine. Forgets what was read so far.
+    Status SeekEarlier() {
+        overshot_ = false;
+        pending_.clear();
+        has_candidate_ = false;
+        seen_before_start_ = false;
+        pending_end_abs_ = INT64_MIN;
+        backoff_us_ = backoff_us_ == 0 ? AV_TIME_BASE : backoff_us_ * 2;
+        const int64_t target = start_abs_ - backoff_us_;
+        if (target > in_.origin && avformat_seek_file(in_.ctx, -1, INT64_MIN, target, target, 0) >= 0) return {};
+        from_beginning_ = true;
+        // A byte seek reaches the start of index-less inputs; formats that refuse it seek by time.
+        int ret = av_seek_frame(in_.ctx, -1, 0, AVSEEK_FLAG_BYTE);
+        if (ret < 0) ret = avformat_seek_file(in_.ctx, -1, INT64_MIN, INT64_MIN, in_.origin, 0);
+        if (ret == AVERROR_EXIT || cancellation_->IsCancelled()) return remux::Cancelled();
+        return ret < 0 ? Failure(ret, false, "seek back to the start of the input") : Status{};
     }
 
     void SetAnchor(int64_t pts, AVRational time_base) {
@@ -224,6 +271,10 @@ private:
 
     bool anchored_ = false;
     bool has_candidate_ = false;
+    bool from_beginning_ = true;      // false while reading from a seek position that may have overshot
+    bool overshot_ = false;           // set by FindAnchor, handled by CopyPackets
+    bool seen_before_start_ = false;  // audio only: a packet ending at or before the start was read
+    int64_t backoff_us_ = 0;
     int64_t anchor_pts_ = 0;
     AVRational anchor_time_base_ = AV_TIME_BASE_Q;
     std::deque<Packet> pending_;

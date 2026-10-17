@@ -9,6 +9,10 @@
 # Probe samples are remuxed from those without re-encoding:
 #   - video_h264_rotated.mp4: display matrix rotation -90 (ffprobe), i.e. shown rotated 90 degrees clockwise
 #   - video_h264.h264 (Annex B) and audio_aac.aac (ADTS): raw streams whose duration the container does not state
+#   - av_offset.ts: av_h264_aac.mp4 in MPEG-TS, whose timestamps start at about 1.44 s (non-zero start time)
+# Regression samples with their own encodes (roadmap 2.6), otherwise like av_h264_aac.mp4:
+#   - av_long_gop.mp4: keyframes only every 4 s (0, 4, 8 s)
+#   - av_vfr.mp4: variable frame rate, 30 fps for 5 s then 15 fps; a keyframe every 1 s; audio ends at 9.96 s
 param(
     [string]$FFmpeg = "ffmpeg"
 )
@@ -45,5 +49,12 @@ $videoMp4 = Join-Path $out "video_h264.mp4"
 Invoke-FFmpeg ($global + @("-display_rotation:v:0", "-90", "-i", $videoMp4, "-c", "copy") + $output + @((Join-Path $out "video_h264_rotated.mp4")))
 Invoke-FFmpeg ($global + @("-i", $videoMp4, "-c", "copy", "-bsf:v", "h264_mp4toannexb", "-f", "h264", (Join-Path $out "video_h264.h264")))
 Invoke-FFmpeg ($global + @("-i", (Join-Path $out "audio_aac.m4a"), "-c", "copy", "-f", "adts", (Join-Path $out "audio_aac.aac")))
+Invoke-FFmpeg ($global + @("-i", (Join-Path $out "av_h264_aac.mp4"), "-c", "copy") + $output + @((Join-Path $out "av_offset.ts")))
+
+$longGop = $h264 + @("-g", "120", "-keyint_min", "120")
+Invoke-FFmpeg ($global + $video + $audio + $longGop + $aac + $output + @("-shortest", (Join-Path $out "av_long_gop.mp4")))
+$vfrVideo = @("-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=10,select='lt(t\,5)+not(mod(n\,2))'")
+$vfr = @("-fps_mode", "passthrough", "-force_key_frames", "expr:gte(t,n_forced*1)", "-g", "300")
+Invoke-FFmpeg ($global + $vfrVideo + $audio + $h264 + $vfr + $aac + $output + @("-shortest", (Join-Path $out "av_vfr.mp4")))
 
 Get-ChildItem $out | Select-Object Name, Length
