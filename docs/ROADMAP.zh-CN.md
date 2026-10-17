@@ -15,9 +15,9 @@
 
 完成一项或改变计划时更新本节，新的会话从这里接手。
 
-- **当前阶段**：M1 进行中。已完成 1.1、4.1、4.3、2.1（快速裁剪）、2.5（`OutputDelivery` 临时文件与排他交付）和 2.2（关键帧对齐分割），均未发布。3.1 的实现已合入，但选择器与云盘的界面实测未做，尚未勾选。裁剪与分割只有内部的阻塞入口 `Trimmer.trim` / `Splitter.split`，接受 `MediaInput`（`File`、`Uri`、描述符）；裁剪输出可以是 `File` 或 `Uri`。
-- **最近完成**：2026-10-17 完成 3.1 的实现与自动化测试，`Uri` 输出改为"缓存临时文件 + 一次性复制"。同日全部 55 项仪器测试在 x86_64 模拟器（API 35）与 ARM64 真机（Xiaomi M2102K1AC，API 34）上均通过，这也是 2.1/2.2/2.5 的测试首次在 x86_64 上运行。小米真机每次安装测试 APK 都需要在手机上确认，无人值守时用模拟器（设 `ANDROID_SERIAL=emulator-5554`）。2.6 的生成样本已就位（音视频、纯视频、纯音频），长 GOP、非零起始时间、VFR 样本还没有。上一次发布是 2026-10-08 的 `v1.0.3`，记录见 [发布文档](RELEASES.zh-CN.md) 3.1。
-- **下一步**：4.2（公开挂起入口）：`FFmpeg.trim`/`FFmpeg.split` 与 `File`/`Uri` 扩展，自动切到 IO 调度器，协程取消通知原生任务；同时让 demo 应用提供系统文件选择器、照片选择器的裁剪入口，用来补齐 3.1 的界面实测。之后做 2.3、3.2。
+- **当前阶段**：M1 进行中。已完成 1.1、4.1、4.3、2.1（快速裁剪）、2.5（临时文件与排他交付）、2.2（关键帧对齐分割）和 4.2（公开挂起 API），均未发布。3.1 的实现已合入，但选择器与云盘的界面实测未做，尚未勾选。公开入口：`FFmpeg.trim`/`FFmpeg.split`，以及 `File`/`Uri` 的 `trimTo`/`splitTo`。M1 剩余：1.2、2.3、2.4、2.6、3.1 界面实测、3.2、4.4。
+- **最近完成**：2026-10-17 完成 4.2。协程取消经 `NativeCancellation` 传到原生层（`interrupt_callback` 与包循环检查），清理完成后才以原样的 `CancellationException` 结束。全部 62 项仪器测试在 x86_64 模拟器（API 35）与 ARM64 真机（Xiaomi M2102K1AC，API 34）上均通过。小米真机每次安装测试 APK 都需要在手机上确认，无人值守时用模拟器（设 `ANDROID_SERIAL=emulator-5554`）。2.6 的生成样本已就位（音视频、纯视频、纯音频），长 GOP、非零起始时间、VFR 样本还没有。上一次发布是 2026-10-08 的 `v1.0.3`，记录见 [发布文档](RELEASES.zh-CN.md) 3.1。
+- **下一步**：demo 应用增加"选择视频 → 裁剪 / 分割 → 保存"的界面，分别从系统文件选择器（`ACTION_OPEN_DOCUMENT`）和照片选择器取得输入、写入 MediaStore，在真机上完成 3.1 的界面实测（云盘来源视设备上可用的 provider 而定）；这也为 1.2 的接入示例打底。之后做 3.2（结构化 `probe`）、2.3、2.6。
 - **验证环境**：Xiaomi M2102K1AC（Android 14，API 34，arm64-v8a）真机；AVD `375x812_Unit_IN`。
 
 ## 当前基线
@@ -75,7 +75,7 @@
 ### 第 4 章　Kotlin API、错误模型与首个发布
 
 - [x] **4.1 `Duration` 与强类型范围**（★；依赖：1.1）。交付：`TimeRange(start, endExclusive)`，终点可省略；拒绝负数、无穷值、溢出和非整数微秒。验收：非法值在执行前抛 `IllegalArgumentException`。证据：`ffmpegkit/src/test/.../TimeRangeTest.kt` 13 项 host 测试（`:ffmpegkit:testDebugUnitTest`）覆盖各类非法值与边界。
-- [ ] **4.2 挂起函数与扩展**（★★；依赖：2.1、3.1）。交付：`FFmpeg.trim`/`FFmpeg.split` 挂起入口，`File` 与 `Uri` 扩展，自动切换到 IO 调度器。验收：主线程不做媒体 I/O；协程取消会通知原生任务，清理完成后才结束。
+- [x] **4.2 挂起函数与扩展**（★★；依赖：2.1、3.1）。交付：`FFmpeg.trim`/`FFmpeg.split` 挂起入口，`File` 与 `Uri` 扩展，自动切换到 IO 调度器。验收：主线程不做媒体 I/O；协程取消会通知原生任务，清理完成后才结束。证据：公开 API（`FFmpeg`、`TrimRequest`、`SplitRequest.byDuration`、`MediaInput`、`MediaOutput`、结果类型与 `trimTo`/`splitTo` 扩展）；取消标志经 `interrupt_callback` 与包循环检查传到原生层（`NativeCancellation`、`runNative`）。仪器测试 `FFmpegApiTest` 7 项，2026-10-17 在 x86_64 模拟器（API 35）与 Xiaomi M2102K1AC（API 34）上均通过（全部仪器测试 62/62）：从主线程调用时工作在其他线程执行；扩展与参数校验；失败以 `FFmpegException` 抛出；用每次读取延迟 150 ms 的代理描述符在第 2 次读取后取消裁剪与分割，结果是原样的 `CancellationException`，协程结束后不再有读取（完整运行需 4 次读取，取消后为 2 次），且没有输出或临时文件残留。进度回调属于 5.2，不在本项范围。
 - [x] **4.3 错误模型**（★★；依赖：4.1）。交付：`FFmpegException` 带 `reason` 枚举和原生错误码；取消不包装。验收：输入缺失、权限、已有输出、不支持的媒体、损坏媒体、原生错误均可区分；**首次发布前冻结**，之后只增不改。证据：host 测试 `ErrorMappingTest`（14 项）与 `FFmpegExceptionTest`（4 项，其中一项锁定 `Reason` 的名称与顺序）；仪器测试 `PackagedErrorsTest` 7 项，2026-10-17 在 Xiaomi M2102K1AC（arm64-v8a，API 34）通过，核对映射表与 FFmpeg 头文件中的 `AVERROR` 值一致，并在真实文件上区分输入缺失、无读权限、输出已存在、输出目录缺失与只读目录。实际媒体操作中的不支持/损坏媒体由 2.1 与 2.6 的媒体测试覆盖。
 - [ ] **4.4 首个编辑版本发布**（★★；依赖：2.6、4.1–4.3）。交付：按[发布清单](RELEASES.zh-CN.md)统一版本号、使用固定的 NDK、通过 `verifyNativeAlignment`、补齐 LICENSE 与第三方声明。验收：空白消费者工程从 JitPack 解析新版本，并在 ARM64 真机与 x86_64 模拟器上运行 trim/split。
 

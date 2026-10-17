@@ -32,6 +32,14 @@ int64_t SeekFd(void* opaque, int64_t offset, int whence) {
     return position < 0 ? AVERROR(errno) : position;
 }
 
+int Interrupted(void* opaque) {
+    return static_cast<const Cancellation*>(opaque)->IsCancelled() ? 1 : 0;
+}
+
+AVIOInterruptCB InterruptCallback(const Cancellation* cancellation) {
+    return AVIOInterruptCB{Interrupted, const_cast<Cancellation*>(cancellation)};
+}
+
 }  // namespace
 
 Input::~Input() {
@@ -47,6 +55,15 @@ Source ToSource(JNIEnv* env, jbyteArray path, jint fd) {
     if (path != nullptr) source.path = ToUtf8Path(env, path);
     source.fd = fd;
     return source;
+}
+
+const Cancellation* FromHandle(jlong handle) {
+    static const Cancellation kNever;
+    return handle == 0 ? &kNever : reinterpret_cast<const Cancellation*>(handle);
+}
+
+Status Cancelled() {
+    return Failure(AVERROR_EXIT, false, "cancelled");
 }
 
 Status Failure(int code, bool output_side, std::string detail) {
@@ -70,7 +87,11 @@ void Output::Reset() {
     ctx = nullptr;
 }
 
-Status OpenInput(const Source& source, Input* input) {
+Status OpenInput(const Source& source, const Cancellation* cancellation, Input* input) {
+    if (cancellation->IsCancelled()) return Cancelled();
+    input->ctx = avformat_alloc_context();
+    if (input->ctx == nullptr) return Failure(AVERROR(ENOMEM), false, "allocate input context");
+    input->ctx->interrupt_callback = InterruptCallback(cancellation);
     int ret;
     if (source.fd >= 0) {
         // Pipes and some provider streams cannot seek; M1 needs seeking (keyframe search, MP4 index).
@@ -86,16 +107,16 @@ Status OpenInput(const Source& source, Input* input) {
             av_free(buffer);
             return Failure(AVERROR(ENOMEM), false, "allocate input context");
         }
-        input->ctx = avformat_alloc_context();
-        if (input->ctx == nullptr) return Failure(AVERROR(ENOMEM), false, "allocate input context");
         input->ctx->pb = input->io;
         input->ctx->flags |= AVFMT_FLAG_CUSTOM_IO;
         ret = avformat_open_input(&input->ctx, nullptr, nullptr, nullptr);  // frees ctx on failure
     } else {
         ret = avformat_open_input(&input->ctx, source.path.c_str(), nullptr, nullptr);
     }
+    if (ret == AVERROR_EXIT || cancellation->IsCancelled()) return Cancelled();
     if (ret < 0) return Failure(ret, false, "open input");
     ret = avformat_find_stream_info(input->ctx, nullptr);
+    if (ret == AVERROR_EXIT || cancellation->IsCancelled()) return Cancelled();
     if (ret < 0) return Failure(ret, false, "read stream info");
 
     input->tracks.assign(input->ctx->nb_streams, Track{});
@@ -121,12 +142,14 @@ Status OpenInput(const Source& source, Input* input) {
     return {};
 }
 
-Status OpenOutput(const Input& input, const std::string& path, Output* output) {
+Status OpenOutput(const Input& input, const std::string& path, const Cancellation* cancellation, Output* output) {
+    if (cancellation->IsCancelled()) return Cancelled();
     int ret = avformat_alloc_output_context2(&output->ctx, nullptr, nullptr, path.c_str());
     if (ret < 0 || output->ctx == nullptr) {
         return Rejected(kReasonUnsupportedMedia, true, "no container matches the output file extension", ret);
     }
     AVFormatContext* out = output->ctx;
+    out->interrupt_callback = InterruptCallback(cancellation);
     for (unsigned i = 0; i < input.ctx->nb_streams; ++i) {
         if (input.tracks[i].output_index < 0) continue;
         const AVStream* ist = input.ctx->streams[i];
@@ -146,7 +169,8 @@ Status OpenOutput(const Input& input, const std::string& path, Output* output) {
         ost->disposition = ist->disposition;
     }
     if (!(out->oformat->flags & AVFMT_NOFILE)) {
-        ret = avio_open(&out->pb, path.c_str(), AVIO_FLAG_WRITE);
+        ret = avio_open2(&out->pb, path.c_str(), AVIO_FLAG_WRITE, &out->interrupt_callback, nullptr);
+        if (ret == AVERROR_EXIT) return Cancelled();
         if (ret < 0) return Failure(ret, true, "open output");
     }
     ret = avformat_write_header(out, nullptr);
@@ -194,3 +218,18 @@ jobject ToJava(JNIEnv* env, const Status& status, const std::vector<int64_t>& ti
 }
 
 }  // namespace remux
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_io_github_nova_ffmpegkit_NativeCancellation_create(JNIEnv* /* env */, jclass /* clazz */) {
+    return reinterpret_cast<jlong>(new remux::Cancellation());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_github_nova_ffmpegkit_NativeCancellation_cancel(JNIEnv* /* env */, jclass /* clazz */, jlong handle) {
+    reinterpret_cast<remux::Cancellation*>(handle)->cancelled.store(true, std::memory_order_relaxed);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_github_nova_ffmpegkit_NativeCancellation_destroy(JNIEnv* /* env */, jclass /* clazz */, jlong handle) {
+    delete reinterpret_cast<remux::Cancellation*>(handle);
+}

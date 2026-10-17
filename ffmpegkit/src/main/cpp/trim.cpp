@@ -23,11 +23,15 @@ using remux::ToMicros;
 
 class Trimmer {
 public:
-    Trimmer(remux::Source input, std::string output, int64_t start_us, int64_t end_us)
-        : input_(std::move(input)), output_path_(std::move(output)), start_us_(start_us), end_us_(end_us) {}
+    Trimmer(remux::Source input, std::string output, int64_t start_us, int64_t end_us, const remux::Cancellation* cancellation)
+        : input_(std::move(input)),
+          output_path_(std::move(output)),
+          start_us_(start_us),
+          end_us_(end_us),
+          cancellation_(cancellation) {}
 
     Status Run() {
-        Status s = remux::OpenInput(input_, &in_);
+        Status s = remux::OpenInput(input_, cancellation_, &in_);
         if (s.failed()) return s;
         if (in_.ctx->duration != AV_NOPTS_VALUE && in_.ctx->duration > 0 && start_us_ >= in_.ctx->duration) {
             return Rejected(remux::kReasonRangeOutsideMedia, false, "start is at or beyond the end of the media");
@@ -35,7 +39,7 @@ public:
         start_abs_ = in_.origin + start_us_;
         end_abs_ = end_us_ < 0 ? INT64_MAX : in_.origin + end_us_;
 
-        s = remux::OpenOutput(in_, output_path_, &out_);
+        s = remux::OpenOutput(in_, output_path_, cancellation_, &out_);
         if (s.failed()) return s;
         if (start_us_ > 0) {
             // Lands on the last keyframe at or before the start; reading from the beginning is also
@@ -56,8 +60,10 @@ private:
         Packet packet(av_packet_alloc());
         if (!packet) return Failure(AVERROR(ENOMEM), false, "allocate packet");
         while (!AllFinished()) {
+            if (cancellation_->IsCancelled()) return remux::Cancelled();
             int ret = av_read_frame(in_.ctx, packet.get());
             if (ret == AVERROR_EOF) break;
+            if (ret == AVERROR_EXIT) return remux::Cancelled();
             if (ret < 0) return Failure(ret, false, "read input");
             if (in_.tracks[packet->stream_index].output_index < 0) {
                 av_packet_unref(packet.get());
@@ -209,6 +215,7 @@ private:
     const std::string output_path_;
     const int64_t start_us_;
     const int64_t end_us_;
+    const remux::Cancellation* const cancellation_;
 
     remux::Input in_;
     remux::Output out_;
@@ -228,7 +235,8 @@ private:
 
 }  // namespace
 
-// Reads from `input_path` (UTF-8 bytes) or, when `input_fd` >= 0, from that descriptor.
+// Reads from `input_path` (UTF-8 bytes) or, when `input_fd` >= 0, from that descriptor; stops with
+// AVERROR_EXIT when `cancellation` (a NativeCancellation handle, or 0) is cancelled.
 // Returns a NativeRemuxStatus whose times are [actual start, actual end) in microseconds.
 extern "C" JNIEXPORT jobject JNICALL
 Java_io_github_nova_ffmpegkit_NativeTrim_trim(
@@ -238,8 +246,10 @@ Java_io_github_nova_ffmpegkit_NativeTrim_trim(
         jint input_fd,
         jbyteArray output,
         jlong start_us,
-        jlong end_us) {
-    Trimmer trimmer(remux::ToSource(env, input_path, input_fd), ToUtf8Path(env, output), start_us, end_us);
+        jlong end_us,
+        jlong cancellation) {
+    Trimmer trimmer(remux::ToSource(env, input_path, input_fd), ToUtf8Path(env, output), start_us, end_us,
+                    remux::FromHandle(cancellation));
     const Status status = trimmer.Run();
     std::vector<int64_t> times;
     if (!status.failed()) times = {trimmer.actual_start_us(), trimmer.actual_end_us()};

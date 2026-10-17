@@ -13,25 +13,27 @@ import java.io.FileOutputStream
 import java.io.IOException
 
 /**
- * Where a media operation reads from (roadmap 3.1). `content://` Uris are read through a file
- * descriptor, never treated as paths. Inputs must be seekable; pipes and streaming providers fail
- * with [Reason.UNSUPPORTED_MEDIA].
+ * Where an operation reads from: a local file, a `content://` or `file://` Uri, or a
+ * [ParcelFileDescriptor]. `content://` Uris are read through their file descriptor, never treated as
+ * paths. Inputs must be seekable; pipes and streaming providers fail with [Reason.UNSUPPORTED_MEDIA].
  */
-internal sealed class MediaInput {
+sealed class MediaInput {
     /** Names the input in error messages. */
-    abstract val description: String
+    internal abstract val description: String
 
     /** The local file behind this input, if there is one; used to detect output == input. */
-    open val file: File? get() = null
+    internal open val file: File? get() = null
 
-    abstract fun open(): OpenedInput
+    internal abstract fun open(): OpenedInput
 
-    class FromFile(override val file: File) : MediaInput() {
+    override fun toString(): String = description
+
+    internal class FromFile(override val file: File) : MediaInput() {
         override val description: String get() = file.path
         override fun open() = OpenedInput(file.path, -1, null)
     }
 
-    class FromUri(val resolver: ContentResolver, val uri: Uri) : MediaInput() {
+    internal class FromUri(val resolver: ContentResolver, val uri: Uri) : MediaInput() {
         override val description: String get() = uri.toString()
         override val file: File? get() = if (uri.scheme == ContentResolver.SCHEME_FILE) uri.path?.let(::File) else null
 
@@ -51,14 +53,18 @@ internal sealed class MediaInput {
     }
 
     /** Reads [descriptor] from offset 0. The caller keeps ownership and closes it. */
-    class FromDescriptor(val descriptor: ParcelFileDescriptor) : MediaInput() {
+    internal class FromDescriptor(val descriptor: ParcelFileDescriptor) : MediaInput() {
         override val description: String get() = "file descriptor ${descriptor.fd}"
         override fun open() = OpenedInput(null, descriptor.fd, null)
     }
 
     companion object {
         fun of(file: File): MediaInput = FromFile(file)
+
+        /** Opened with [ContentResolver.openFileDescriptor] in read mode for the duration of the operation. */
         fun of(resolver: ContentResolver, uri: Uri): MediaInput = FromUri(resolver, uri)
+
+        /** Read from offset 0; the caller keeps ownership and closes [descriptor] afterwards. */
         fun of(descriptor: ParcelFileDescriptor): MediaInput = FromDescriptor(descriptor)
     }
 }
@@ -70,12 +76,17 @@ internal class OpenedInput(val path: String?, val fd: Int, private val owned: Cl
     }
 }
 
-/** Where a single-file operation writes to. */
-internal sealed class MediaOutput {
-    abstract val description: String
+/**
+ * Where a single-file operation writes to: a local file, which is never overwritten, or a Uri the
+ * caller created and owns, whose content is replaced once the output is complete.
+ */
+sealed class MediaOutput {
+    internal abstract val description: String
+
+    override fun toString(): String = description
 
     /** Never overwritten; see [OutputDelivery]. */
-    class ToFile(val file: File) : MediaOutput() {
+    internal class ToFile(val file: File) : MediaOutput() {
         override val description: String get() = file.path
     }
 
@@ -83,7 +94,7 @@ internal sealed class MediaOutput {
      * A Uri the caller created and owns (e.g. a MediaStore item or a SAF document). Its content is
      * replaced, but only after the whole output was written to a temporary file; see [UriDelivery].
      */
-    class ToUri(val resolver: ContentResolver, val uri: Uri, val containerExtension: String) : MediaOutput() {
+    internal class ToUri(val resolver: ContentResolver, val uri: Uri, val containerExtension: String) : MediaOutput() {
         override val description: String get() = uri.toString()
     }
 

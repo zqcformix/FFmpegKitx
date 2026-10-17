@@ -2,6 +2,7 @@
 #pragma once
 
 #include <jni.h>
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -64,6 +65,16 @@ struct Source {
     int fd = -1;
 };
 
+// Set from Kotlin (NativeCancellation) when the coroutine is cancelled. FFmpeg's interrupt callback
+// and the packet loops poll it; interrupted work fails with AVERROR_EXIT and cleans up as usual.
+struct Cancellation {
+    std::atomic<bool> cancelled{false};
+    bool IsCancelled() const { return cancelled.load(std::memory_order_relaxed); }
+};
+
+// The Cancellation behind a handle from NativeCancellation.create(); never null (0 → a never-cancelled one).
+const Cancellation* FromHandle(jlong handle);
+
 struct Output {
     AVFormatContext* ctx = nullptr;
 
@@ -76,13 +87,16 @@ struct Output {
 
 // Opens the input and selects at most one video stream plus every audio stream (M1 limits).
 // A file descriptor must be seekable; it is read from offset 0 and never closed here.
-Status OpenInput(const Source& source, Input* input);
+Status OpenInput(const Source& source, const Cancellation* cancellation, Input* input);
 
 // Reads the Source passed from Kotlin as (UTF-8 path bytes or null, fd or -1).
 Source ToSource(JNIEnv* env, jbyteArray path, jint fd);
 
 // Creates the output for the selected streams and writes its header.
-Status OpenOutput(const Input& input, const std::string& path, Output* output);
+Status OpenOutput(const Input& input, const std::string& path, const Cancellation* cancellation, Output* output);
+
+// The Status for work stopped by cancellation.
+Status Cancelled();
 
 // Writes the trailer and closes the file, reporting flush errors such as a full disk.
 Status CloseOutput(Output* output);
