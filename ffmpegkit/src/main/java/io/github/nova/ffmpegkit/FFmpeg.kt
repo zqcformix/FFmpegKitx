@@ -19,7 +19,7 @@ object FFmpeg {
     /** Fast (stream copy) trim; see [TrimResult] for how the actual range relates to the request. */
     suspend fun trim(request: TrimRequest): TrimResult = runNative { cancellation ->
         workerThreadObserver?.invoke(Thread.currentThread())
-        Trimmer.trim(request.input, request.output, request.range, cancellation)
+        Trimmer.trim(request.input, request.output, request.range, cancellation, request.mode)
     }
 
     /** Splits the input into segments; see [SplitRequest.byDuration] and [SplitRequest.byRanges]. */
@@ -64,12 +64,47 @@ object FFmpeg {
 /**
  * Trims [input] to [range] without re-encoding and writes [output]. The output extension (or, for a
  * Uri, the container extension) selects the container; the streams must fit it.
+ *
+ * @throws IllegalArgumentException if [mode] is [TrimMode.EDIT_LIST] and the output is not MP4/MOV.
  */
 class TrimRequest(
     val input: MediaInput,
     val output: MediaOutput,
     val range: TimeRange,
-)
+    val mode: TrimMode = TrimMode.KEYFRAME,
+) {
+    init {
+        if (mode == TrimMode.EDIT_LIST) {
+            val extension = when (output) {
+                is MediaOutput.ToFile -> output.file.extension
+                is MediaOutput.ToUri -> output.containerExtension
+            }
+            require(extension.lowercase() in TrimMode.EDIT_LIST_EXTENSIONS) {
+                "TrimMode.EDIT_LIST needs an MP4 or MOV output (${TrimMode.EDIT_LIST_EXTENSIONS.joinToString()}), not \"$extension\""
+            }
+        }
+    }
+}
+
+/** Where a trim's output starts; see [FFmpeg.trim]. */
+enum class TrimMode {
+    /**
+     * The output starts at the keyframe at or before the requested start ([TrimResult.actualRange]),
+     * so it may show up to one GOP before it. Works with every container and player.
+     */
+    KEYFRAME,
+
+    /**
+     * MP4/MOV only. The output holds the same data as [KEYFRAME], but its timeline starts at the
+     * requested start: the frames before it get negative timestamps and an edit list tells players to
+     * decode but not show them. Players that ignore edit lists show those frames, or start with a delay.
+     */
+    EDIT_LIST;
+
+    internal companion object {
+        val EDIT_LIST_EXTENSIONS = setOf("mp4", "m4v", "m4a", "mov", "3gp", "3g2")
+    }
+}
 
 /** Describes a split; create one with [byDuration] or [byRanges]. */
 class SplitRequest private constructor(
@@ -132,7 +167,9 @@ class SplitRequest private constructor(
 /**
  * Result of [FFmpeg.trim]. [actualRange] is what was written, on the input's timeline from its start:
  * it begins at the keyframe at or before [requestedRange]'s start and may end slightly after the
- * requested end because of B-frame reordering. The output is complete when the call returns.
+ * requested end because of B-frame reordering. With [TrimMode.EDIT_LIST] the same data is written,
+ * but players that honour edit lists start showing at [requestedRange]'s start. The output is
+ * complete when the call returns.
  */
 class TrimResult internal constructor(
     val requestedRange: TimeRange,
@@ -160,12 +197,21 @@ class SplitSegment internal constructor(val file: File, val actualRange: TimeRan
 }
 
 /** Trims this file to [start, endExclusive) (to the end of the media if [endExclusive] is null) into [output]. */
-suspend fun File.trimTo(output: File, start: Duration, endExclusive: Duration? = null): TrimResult =
-    FFmpeg.trim(TrimRequest(MediaInput.of(this), MediaOutput.of(output), TimeRange(start, endExclusive)))
+suspend fun File.trimTo(
+    output: File,
+    start: Duration,
+    endExclusive: Duration? = null,
+    mode: TrimMode = TrimMode.KEYFRAME,
+): TrimResult = FFmpeg.trim(TrimRequest(MediaInput.of(this), MediaOutput.of(output), TimeRange(start, endExclusive), mode))
 
 /** Trims the content behind this Uri to [start, endExclusive) into [output]. */
-suspend fun Uri.trimTo(resolver: ContentResolver, output: File, start: Duration, endExclusive: Duration? = null): TrimResult =
-    FFmpeg.trim(TrimRequest(MediaInput.of(resolver, this), MediaOutput.of(output), TimeRange(start, endExclusive)))
+suspend fun Uri.trimTo(
+    resolver: ContentResolver,
+    output: File,
+    start: Duration,
+    endExclusive: Duration? = null,
+    mode: TrimMode = TrimMode.KEYFRAME,
+): TrimResult = FFmpeg.trim(TrimRequest(MediaInput.of(resolver, this), MediaOutput.of(output), TimeRange(start, endExclusive), mode))
 
 /** Splits this file; see [SplitRequest.byDuration]. */
 suspend fun File.splitTo(

@@ -34,6 +34,7 @@ import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -53,6 +54,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.compose.AsyncImage
 import io.github.nova.ffmpegkit.StreamInfo
 import io.github.nova.ffmpegkit.TimeRange
+import io.github.nova.ffmpegkit.TrimMode
 import java.util.Locale
 import kotlin.math.roundToLong
 import kotlin.time.Duration
@@ -120,7 +122,7 @@ fun EditorScreen(viewModel: EditorViewModel = viewModel()) {
                 EditSection(
                     source = source,
                     enabled = !running,
-                    onTrim = { range -> withWritePermission { viewModel.trim(range) } },
+                    onTrim = { range, trimMode -> withWritePermission { viewModel.trim(range, trimMode) } },
                     onSplit = { duration -> withWritePermission { viewModel.split(duration) } },
                     onInvalid = { toast(context, it) },
                 )
@@ -161,7 +163,7 @@ private fun SourceDetails(source: VideoSource) {
 private fun EditSection(
     source: VideoSource,
     enabled: Boolean,
-    onTrim: (TimeRange) -> Unit,
+    onTrim: (TimeRange, TrimMode) -> Unit,
     onSplit: (Duration) -> Unit,
     onInvalid: (String) -> Unit,
 ) {
@@ -169,6 +171,7 @@ private fun EditSection(
     var start by rememberSaveable { mutableStateOf("0") }
     var end by rememberSaveable { mutableStateOf("") }
     var segment by rememberSaveable { mutableStateOf("10") }
+    var editList by rememberSaveable { mutableStateOf(false) }
 
     Section("2. Edit (stream copy, keyframe aligned)") {
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
@@ -204,13 +207,23 @@ private fun EditSection(
                     SecondsField("Start (s)", start, enabled, Modifier.weight(1f)) { start = it }
                     SecondsField("End (s), empty = end", end, enabled, Modifier.weight(1f)) { end = it }
                 }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Switch(checked = editList && source.supportsEditList, onCheckedChange = { editList = it }, enabled = enabled && source.supportsEditList)
+                    Column {
+                        Text("Start exactly (MP4 edit list)", style = MaterialTheme.typography.bodyMedium)
+                        Detail(
+                            if (source.supportsEditList) "Players that honour edit lists hide the frames before the start"
+                            else "Only for MP4/MOV inputs",
+                        )
+                    }
+                }
                 Button(
                     onClick = {
                         val from = parseSeconds(start)
                         val to = if (end.isBlank()) null else parseSeconds(end) ?: return@Button onInvalid("End is not a number")
                         if (from == null) return@Button onInvalid("Start is not a number")
                         try {
-                            onTrim(TimeRange(from, to))
+                            onTrim(TimeRange(from, to), if (editList && source.supportsEditList) TrimMode.EDIT_LIST else TrimMode.KEYFRAME)
                         } catch (e: IllegalArgumentException) {
                             onInvalid(e.message ?: "Invalid range")
                         }

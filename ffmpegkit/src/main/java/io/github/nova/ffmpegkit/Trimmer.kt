@@ -12,15 +12,22 @@ import kotlin.time.Duration.Companion.microseconds
  */
 internal object Trimmer {
 
-    fun trim(input: File, output: File, range: TimeRange): TrimResult =
-        trim(MediaInput.of(input), MediaOutput.of(output), range)
+    fun trim(input: File, output: File, range: TimeRange, mode: TrimMode = TrimMode.KEYFRAME): TrimResult =
+        trim(MediaInput.of(input), MediaOutput.of(output), range, mode = mode)
 
-    fun trim(input: MediaInput, output: MediaOutput, range: TimeRange, cancellation: NativeCancellation? = null): TrimResult {
+    fun trim(
+        input: MediaInput,
+        output: MediaOutput,
+        range: TimeRange,
+        cancellation: NativeCancellation? = null,
+        mode: TrimMode = TrimMode.KEYFRAME,
+    ): TrimResult {
+        val editList = mode == TrimMode.EDIT_LIST
         val times = when (output) {
             is MediaOutput.ToFile ->
-                OutputDelivery.deliver(input.file, output.file) { temp -> run(input, temp, output, range, cancellation) }.value
+                OutputDelivery.deliver(input.file, output.file) { temp -> run(input, temp, output, range, editList, cancellation) }.value
             is MediaOutput.ToUri ->
-                UriDelivery.deliver(output) { temp -> run(input, temp, output, range, cancellation) }
+                UriDelivery.deliver(output) { temp -> run(input, temp, output, range, editList, cancellation) }
         }
         return TrimResult(range, TimeRange(times[0].microseconds, times[1].microseconds), output)
     }
@@ -30,6 +37,7 @@ internal object Trimmer {
         temp: File,
         output: MediaOutput,
         range: TimeRange,
+        editList: Boolean,
         cancellation: NativeCancellation?,
     ): LongArray = input.open().use { opened ->
         val status = NativeTrim.trim(
@@ -38,6 +46,7 @@ internal object Trimmer {
             temp.path.toByteArray(),
             range.startMicros,
             range.endExclusiveMicros ?: -1,
+            editList,
             cancellation?.nativeHandle ?: 0L,
         )
         cancellation?.throwIfCancelled() // before anything is published
@@ -53,7 +62,8 @@ internal object NativeTrim {
 
     /**
      * Reads [inputPath] (UTF-8 bytes) or, when [inputFd] >= 0, that descriptor. [endUs] is -1 to trim
-     * to the end of the media; [cancellation] is a [NativeCancellation] handle or 0. Times: [actual start, end).
+     * to the end of the media; [editList] selects [TrimMode.EDIT_LIST]; [cancellation] is a
+     * [NativeCancellation] handle or 0. Times: [actual start, end).
      */
     @JvmStatic
     external fun trim(
@@ -62,6 +72,7 @@ internal object NativeTrim {
         output: ByteArray,
         startUs: Long,
         endUs: Long,
+        editList: Boolean,
         cancellation: Long,
     ): NativeRemuxStatus
 }
