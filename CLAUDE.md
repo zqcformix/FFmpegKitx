@@ -77,7 +77,10 @@ ffmpegkit/src/main/
 
 ### app (Demo Module)
 
-Sample app demonstrating library usage. Uses `FFmpegKit.xxx()` API calls — no direct JNI or `System.loadLibrary()`.
+Sample app demonstrating library usage through the public API only — no direct JNI or `System.loadLibrary()`. Two tabs:
+
+- **Edit** (`editor/`): pick a video with the system file picker (`ACTION_OPEN_DOCUMENT`) or the photo picker, trim or split it, save to `Movies/FFmpegKit`. `Gallery` writes MediaStore items as pending and deletes them on failure or cancellation (Android 10+; split goes through a cache directory, then is copied in); Android 8–9 writes the public Movies directory with `WRITE_EXTERNAL_STORAGE` and the media scanner. Each run logs a report under tag `FFmpegKitDemo` (picker, input Uri authority, requested and actual ranges), also copyable from the UI — the evidence format for roadmap 3.1's picker tests
+- **FFmpeg info**: `FFmpegKit.getVersion()` etc.
 
 ## FFmpeg Integration
 
