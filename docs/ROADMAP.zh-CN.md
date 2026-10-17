@@ -15,9 +15,9 @@
 
 完成一项或改变计划时更新本节，新的会话从这里接手。
 
-- **当前阶段**：M1 进行中。已完成 1.1（README 能力清单与非目标）和 4.1（`TimeRange`），均未发布。
-- **最近完成**：2026-10-17 完成 1.1 和 4.1。库模块已有 host 单元测试（`ffmpegkit/src/test`）和仪器测试（`ffmpegkit/src/androidTest`）。上一次发布是 2026-10-08 的 `v1.0.3`，记录见 [发布文档](RELEASES.zh-CN.md) 3.1。
-- **下一步**：4.3（错误模型），依赖已满足，2.1 会用到它。然后做 2.1（快速时间裁剪），开工前先准备 2.6 所需的生成样本，供 host 与设备测试使用。
+- **当前阶段**：M1 进行中。已完成 1.1（README 能力清单与非目标）、4.1（`TimeRange`）和 4.3（`FFmpegException` 错误模型），均未发布。
+- **最近完成**：2026-10-17 完成 4.3。内部的 `mapIoFailures`、`nativeFailure` 与 `AvError.reasonOf` 负责把 Java I/O 异常与 `AVERROR` 转成 `FFmpegException`，后续的媒体操作都应通过它们报错。上一次发布是 2026-10-08 的 `v1.0.3`，记录见 [发布文档](RELEASES.zh-CN.md) 3.1。
+- **下一步**：2.1（快速时间裁剪）。开工前先准备 2.6 所需的生成样本，供 host 与设备测试使用。
 - **验证环境**：Xiaomi M2102K1AC（Android 14，API 34，arm64-v8a）真机；AVD `375x812_Unit_IN`。
 
 ## 当前基线
@@ -76,7 +76,7 @@
 
 - [x] **4.1 `Duration` 与强类型范围**（★；依赖：1.1）。交付：`TimeRange(start, endExclusive)`，终点可省略；拒绝负数、无穷值、溢出和非整数微秒。验收：非法值在执行前抛 `IllegalArgumentException`。证据：`ffmpegkit/src/test/.../TimeRangeTest.kt` 13 项 host 测试（`:ffmpegkit:testDebugUnitTest`）覆盖各类非法值与边界。
 - [ ] **4.2 挂起函数与扩展**（★★；依赖：2.1、3.1）。交付：`FFmpeg.trim`/`FFmpeg.split` 挂起入口，`File` 与 `Uri` 扩展，自动切换到 IO 调度器。验收：主线程不做媒体 I/O；协程取消会通知原生任务，清理完成后才结束。
-- [ ] **4.3 错误模型**（★★；依赖：4.1）。交付：`FFmpegException` 带 `reason` 枚举和原生错误码；取消不包装。验收：输入缺失、权限、已有输出、不支持的媒体、损坏媒体、原生错误均可区分；**首次发布前冻结**，之后只增不改。
+- [x] **4.3 错误模型**（★★；依赖：4.1）。交付：`FFmpegException` 带 `reason` 枚举和原生错误码；取消不包装。验收：输入缺失、权限、已有输出、不支持的媒体、损坏媒体、原生错误均可区分；**首次发布前冻结**，之后只增不改。证据：host 测试 `ErrorMappingTest`（14 项）与 `FFmpegExceptionTest`（4 项，其中一项锁定 `Reason` 的名称与顺序）；仪器测试 `PackagedErrorsTest` 7 项，2026-10-17 在 Xiaomi M2102K1AC（arm64-v8a，API 34）通过，核对映射表与 FFmpeg 头文件中的 `AVERROR` 值一致，并在真实文件上区分输入缺失、无读权限、输出已存在、输出目录缺失与只读目录。实际媒体操作中的不支持/损坏媒体由 2.1 与 2.6 的媒体测试覆盖。
 - [ ] **4.4 首个编辑版本发布**（★★；依赖：2.6、4.1–4.3）。交付：按[发布清单](RELEASES.zh-CN.md)统一版本号、使用固定的 NDK、通过 `verifyNativeAlignment`、补齐 LICENSE 与第三方声明。验收：空白消费者工程从 JitPack 解析新版本，并在 ARM64 真机与 x86_64 模拟器上运行 trim/split。
 
 ## 第二卷 · 可靠内核（M2）

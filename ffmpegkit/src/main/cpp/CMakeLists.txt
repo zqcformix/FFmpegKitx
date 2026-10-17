@@ -26,7 +26,8 @@ add_library(swscale SHARED IMPORTED)
 set_target_properties(swscale PROPERTIES IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libswscale.so)
 
 add_library(${CMAKE_PROJECT_NAME} SHARED
-    native-lib.cpp)
+    native-lib.cpp
+    errors.cpp)
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${FFMPEG_INCLUDE_DIR})
