@@ -4,7 +4,28 @@
 [![JitPack](https://jitpack.io/v/zqcformix/FFmpegKitx.svg)](https://jitpack.io/#zqcformix/FFmpegKitx)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Android FFmpeg 8.0.1 封装库，提供 Kotlin API，支持 ASS/SSA 字幕渲染（libass）和 MediaCodec 硬件加速。
+Android 上的 FFmpeg 8.0.1 预编译库，附带查询 FFmpeg 版本与编译配置的 Kotlin API。
+
+## 能力一览
+
+| 项目 | 内容 |
+|------|------|
+| 平台 | Android 8.0+（API 26） |
+| ABI | arm64-v8a、armeabi-v7a、x86_64（x86_64 主要用于模拟器） |
+| FFmpeg | 8.0.1，LGPL 构建（未启用 `--enable-gpl`、`--enable-version3`、`--enable-nonfree`） |
+| 打包的库 | libavcodec、libavformat、libavfilter、libavutil、libswresample、libswscale（版本见[下文](#ffmpeg-库版本)） |
+| 编译启用的特性 | libass、libfreetype、libfribidi、mediacodec、jni |
+| Kotlin API | FFmpeg 版本、编译配置、libass 是否可用（见 [API](#api)） |
+
+### 当前不提供
+
+- **媒体处理 API**：没有剪辑、分割、转码、合并、截图等接口。
+- **`ffmpeg` / `ffprobe` 命令**：编译时使用了 `--disable-programs`，AAR 中只有共享库，没有可执行的命令行程序，也不能传入命令字符串执行。
+- **字幕渲染与 MediaCodec 硬件编解码的 Kotlin 接口**：libass 和 mediacodec 已编译进 FFmpeg，但本库没有封装调用它们的 API。`isLibassAvailable()` 只表示编译配置中启用了 libass。
+- **在你自己的 native 代码中链接 FFmpeg**：AAR 不包含 FFmpeg 头文件，也没有 Prefab 元数据。
+- **libavdevice**：编译时使用了 `--disable-avdevice`。
+- **GPL 或 nonfree 组件**（如 x264、x265、fdk-aac）：为保持 LGPL 许可，不会打包。
+- **Android 以外的平台**。
 
 ## 依赖使用
 
@@ -77,9 +98,7 @@ FFmpegKit.printInfo()               // 输出所有信息到 Logcat（tag: FFmpe
 | libswresample | 6.1.100 | 音频重采样 |
 | libswscale | 9.1.100 | 图像缩放/格式转换 |
 
-**启用特性**: libass, libfreetype, libfribidi, mediacodec, jni
-
-**支持架构**: arm64-v8a, armeabi-v7a, x86_64
+三个 ABI 的库版本和编译配置相同（各 ABI 的 `--arch`、`--cpu` 等目标参数不同）。可以在运行时用 `FFmpegKit.printInfo()` 核对。
 
 ## License
 
