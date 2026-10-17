@@ -30,6 +30,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
     errors.cpp
     remux.cpp
     trim.cpp
+    split.cpp
     inspect.cpp
     files.cpp)
 
