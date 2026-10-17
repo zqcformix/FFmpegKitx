@@ -49,6 +49,7 @@ ffmpegkit/src/main/
 
 - **Public API**: `FFmpegKit` object — `getVersion()`, `getBuildConfiguration()`, `checkLibassAvailability()`, `isLibassAvailable()`, `printInfo()`; `TimeRange` (unreleased, not yet used by any operation)
 - **Unit tests**: host tests in `ffmpegkit/src/test` (`:ffmpegkit:testDebugUnitTest`)
+- **Instrumented tests**: `ffmpegkit/src/androidTest` (`:ffmpegkit:connectedDebugAndroidTest`, needs a device or emulator). `PackagedLibrariesTest` pins the FFmpeg version, library versions and configure flags that README documents — change README and the test together when the prebuilt .so files change
 - **JNI naming**: `Java_io_github_nova_ffmpegkit_FFmpegKit_methodName` (maps to `FFmpegKit` object, not Activity)
 - **maven-publish** plugin configured for JitPack (`groupId: com.github.zqcformix`, `artifactId: ffmpegkit`)
 - **consumer-rules.pro**: keeps `FFmpegKit` class for consuming apps with ProGuard
