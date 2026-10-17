@@ -1,6 +1,6 @@
 # Android 编辑 API 设计（M1 草案）
 
-> **状态：设计草案，尚未实现。** 下面的代码描述 M1 计划提供的接口，当前源码中不存在，无法编译。已发布的 `v1.0.3` 只包含 `FFmpegKit` 信息查询接口。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
+> **状态：设计草案，大部分尚未实现。** 第 2 节的 `TimeRange` 已在 `main` 实现（未发布）；其余接口当前源码中不存在，示例无法编译。已发布的 `v1.0.3` 只包含 `FFmpegKit` 信息查询接口。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
 
 本文是 M1 范围、行为与限制的唯一出处；其他文档只引用，不复述。
 
@@ -36,7 +36,7 @@ TimeRange.from(10.seconds)       // 从 10s 到媒体结尾
 ```
 
 - 区间为 `[start, endExclusive)`：有限、非负、严格递增，且必须是整数微秒（不暗中截断纳秒）。违反时在执行前抛 `IllegalArgumentException`。
-- 省略终点表示到媒体结尾。终点超过媒体时长时夹取到结尾，结果中的 `actualRange` 反映实际范围，不需要调用方先 probe。
+- 省略终点表示到媒体结尾，`TimeRange.from(start)` 与 `TimeRange(start, null)` 等价。终点超过媒体时长时夹取到结尾，结果中的 `actualRange` 反映实际范围，不需要调用方先 probe。
 - 起点达到或超过媒体时长时失败（`Reason.RANGE_OUTSIDE_MEDIA`），不创建空文件。
 - 时长未知的输入照常执行，只是进度变为不定（见第 5 节）。
 
