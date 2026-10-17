@@ -1,6 +1,5 @@
 package io.github.nova.ffmpegkit
 
-import io.github.nova.ffmpegkit.FFmpegException.Reason
 import java.io.File
 import kotlin.time.Duration.Companion.microseconds
 
@@ -24,54 +23,21 @@ internal class TrimResult(
 internal object Trimmer {
 
     fun trim(input: File, output: File, range: TimeRange): TrimResult {
-        val result = OutputDelivery.deliver(input, output) { temp ->
-            val result = NativeTrim.trim(
+        val status = OutputDelivery.deliver(input, output) { temp ->
+            val status = NativeTrim.trim(
                 input.path.toByteArray(),
                 temp.path.toByteArray(),
                 range.startMicros,
                 range.endExclusiveMicros ?: -1,
             )
-            if (result.failed) throw result.toException(input, output)
-            result
+            if (status.failed) throw status.toException(input, output)
+            status
         }.value
         return TrimResult(
             requestedRange = range,
-            actualRange = TimeRange(result.actualStartUs.microseconds, result.actualEndUs.microseconds),
+            actualRange = TimeRange(status.timesUs[0].microseconds, status.timesUs[1].microseconds),
             output = output,
         )
-    }
-
-    private fun NativeTrimResult.toException(input: File, output: File): FFmpegException {
-        val role = if (outputSide) MediaRole.OUTPUT else MediaRole.INPUT
-        val subject = if (outputSide) output else input
-        val code = this.code.takeIf { it != 0 }
-        return when (reason) {
-            NativeTrimResult.REASON_RANGE_OUTSIDE_MEDIA ->
-                FFmpegException(Reason.RANGE_OUTSIDE_MEDIA, "$detail: $subject", code)
-            NativeTrimResult.REASON_UNSUPPORTED_MEDIA ->
-                FFmpegException(Reason.UNSUPPORTED_MEDIA, "$detail: $subject", code)
-            else -> nativeFailure(this.code, role, "$detail $subject", NativeErrors.describe(this.code))
-        }
-    }
-}
-
-/** Built by trim.cpp; the constructor signature is part of the JNI contract. */
-internal class NativeTrimResult(
-    @JvmField val code: Int,
-    @JvmField val outputSide: Boolean,
-    @JvmField val reason: Int,
-    @JvmField val detail: String?,
-    @JvmField val actualStartUs: Long,
-    @JvmField val actualEndUs: Long,
-) {
-    val failed: Boolean
-        get() = code != 0 || reason != REASON_FROM_CODE
-
-    companion object {
-        // Must match kReason* in trim.cpp.
-        const val REASON_FROM_CODE = 0
-        const val REASON_RANGE_OUTSIDE_MEDIA = 1
-        const val REASON_UNSUPPORTED_MEDIA = 2
     }
 }
 
@@ -80,7 +46,7 @@ internal object NativeTrim {
         System.loadLibrary("ffmpegkit")
     }
 
-    /** Paths are UTF-8 bytes; [endUs] is -1 to trim to the end of the media. */
+    /** Paths are UTF-8 bytes; [endUs] is -1 to trim to the end of the media. Times: [actual start, end). */
     @JvmStatic
-    external fun trim(input: ByteArray, output: ByteArray, startUs: Long, endUs: Long): NativeTrimResult
+    external fun trim(input: ByteArray, output: ByteArray, startUs: Long, endUs: Long): NativeRemuxStatus
 }

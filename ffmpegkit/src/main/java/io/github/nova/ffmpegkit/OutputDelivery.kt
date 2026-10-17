@@ -63,7 +63,24 @@ internal object OutputDelivery {
         }
     }
 
-    private fun checkTarget(input: File?, target: File) {
+    /**
+     * Publishes an already written [temp] at [target] the same way [deliver] does. [temp] must be on
+     * the same file system as [target] (for example in a temporary directory next to it). The caller
+     * removes [temp] afterwards if it still exists.
+     */
+    fun publishFile(
+        temp: File,
+        target: File,
+        publish: (target: Path, temp: Path) -> DeliveryMethod = ::publishAtomically,
+        copy: (source: Path, target: FileChannel) -> Unit = ::copyAll,
+        identity: (Path) -> Any? = ::fileKey,
+    ): DeliveryMethod = publishOrCopy(temp.toPath(), target.toPath(), publish, copy, identity)
+
+    /** Identity (device and inode) of [file], or null where the platform has none or it is missing. */
+    fun identityOf(file: File): Any? = fileKey(file.toPath())
+
+    /** Throws [FFmpegException] unless [target]'s directory exists and [target] does not. */
+    fun checkTarget(input: File?, target: File) {
         val directory = target.absoluteFile.parentFile
         if (directory == null || !directory.isDirectory) {
             throw FFmpegException(Reason.IO, "output directory does not exist: $directory")

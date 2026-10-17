@@ -48,10 +48,24 @@ internal object MediaInspector {
         return MediaSummary(values[1], values[2].takeIf { it >= 0 }, streams)
     }
 
-    // Layout documented in inspect.cpp.
+    /** Every packet in read order, without decoding. */
+    fun packets(file: File): List<PacketDigest> {
+        val values = NativeInspector.packets(file.path.toByteArray())
+        val status = values[0].toInt()
+        if (status != 0) {
+            throw nativeFailure(status, MediaRole.INPUT, "read packets of $file", NativeErrors.describe(status))
+        }
+        return values.drop(1).chunked(PACKET_FIELDS).map { PacketDigest(it[0].toInt(), it[1].toInt(), it[2] == 1L, it[3]) }
+    }
+
+    // Layouts documented in inspect.cpp.
     private const val HEADER_FIELDS = 3
     private const val STREAM_FIELDS = 7
+    private const val PACKET_FIELDS = 4
 }
+
+/** A packet's identity for comparing packet sequences: stream, size, keyframe flag and data hash. */
+internal data class PacketDigest(val stream: Int, val size: Int, val keyframe: Boolean, val hash: Long)
 
 internal object NativeInspector {
     init {
@@ -60,4 +74,7 @@ internal object NativeInspector {
 
     @JvmStatic
     external fun inspect(path: ByteArray): LongArray
+
+    @JvmStatic
+    external fun packets(path: ByteArray): LongArray
 }

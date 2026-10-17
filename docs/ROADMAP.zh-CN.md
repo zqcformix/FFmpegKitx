@@ -15,9 +15,9 @@
 
 完成一项或改变计划时更新本节，新的会话从这里接手。
 
-- **当前阶段**：M1 进行中。已完成 1.1、4.1、4.3、2.1（快速时间裁剪，目前只有内部的阻塞入口 `Trimmer.trim(File, File, TimeRange)`）和 2.5（`OutputDelivery` 临时文件与排他交付），均未发布。
-- **最近完成**：2026-10-17 完成 2.5，`Trimmer` 已改为经 `OutputDelivery` 写临时文件再发布。新的输出型操作都应走 `OutputDelivery.deliver`。2.6 的生成样本已就位（`scripts/generate-test-media.ps1` → `ffmpegkit/src/androidTest/assets/media/`，含音视频、纯视频、纯音频），`MediaInspector` 可全量解码核对输出；长 GOP、非零起始时间、VFR 样本还没有。上一次发布是 2026-10-08 的 `v1.0.3`，记录见 [发布文档](RELEASES.zh-CN.md) 3.1。
-- **下一步**：2.2（关键帧对齐的单遍分割）。每段输出走 `OutputDelivery`；中途失败或取消时回滚本次已发布的段（只删除本次创建、身份仍匹配的文件）。之后做 3.1（`File`/`Uri`/文件描述符输入）。
+- **当前阶段**：M1 进行中。已完成 1.1、4.1、4.3、2.1（快速裁剪）、2.5（`OutputDelivery` 临时文件与排他交付）和 2.2（关键帧对齐分割），均未发布。裁剪与分割目前只有内部的阻塞入口 `Trimmer.trim` / `Splitter.split`，只接受本地 `File`。
+- **最近完成**：2026-10-17 完成 2.2。原生层 `remux.cpp` 是裁剪与分割共用的打开输入、选流、建输出、重标时间戳的部分，JNI 结果统一为 `NativeRemuxStatus`。新的输出型操作都应走 `OutputDelivery`。2.6 的生成样本已就位（`scripts/generate-test-media.ps1`，音视频、纯视频、纯音频），`MediaInspector` 可全量解码，`MediaInspector.packets` 可逐包比对；长 GOP、非零起始时间、VFR 样本还没有。上一次发布是 2026-10-08 的 `v1.0.3`，记录见 [发布文档](RELEASES.zh-CN.md) 3.1。
+- **下一步**：3.1（`File`、`Uri` 与文件描述符输入）：通过 `ParcelFileDescriptor` 加自定义 `AVIOContext` 读取 SAF/MediaStore 内容，区分可 seek 与不可 seek 来源；`Uri` 输出不能使用同目录临时文件，要先定交付语义并写入 ANDROID_API 第 7 节。之后做 4.2（公开挂起入口）、2.3、3.2。
 - **验证环境**：Xiaomi M2102K1AC（Android 14，API 34，arm64-v8a）真机；AVD `375x812_Unit_IN`。
 
 ## 当前基线
@@ -61,7 +61,7 @@
 ### 第 2 章　快速时间裁剪与分割
 
 - [x] **2.1 快速时间裁剪**（★★；依赖：1.1、4.1）。交付：基于 libavformat 的 seek、流映射、时间戳重标定与 remux；结果同时返回 `requestedRange` 和实际首末包时间 `actualRange`；终点可省略（到媒体结尾）。验收：带音视频样本可解封装和解码，音画同步保持；`actualRange` 与 FFprobe 结果一致。证据：内部 `Trimmer`（`trim.cpp`）与仪器测试 `TrimTest` 14 项，2026-10-17 在 Xiaomi M2102K1AC（arm64-v8a，API 34）全部通过。样本由 `scripts/generate-test-media.ps1` 生成（H.264 带 B 帧、每秒一个关键帧，AAC 带 priming）；期望的 `actualRange` 与各流包数由 `ffprobe -show_packets` 推出，测试逐项相等，并用 `MediaInspector` 全量解码确认零错误、音视频起点相差不足一个 AAC 帧。另将三个设备输出拉回桌面，用 FFmpeg master 的 `ffprobe` 与 `-err_detect explode` 完整解码复核，包数一致、无错误、首包为关键帧。公开的挂起入口见 4.2，临时文件交付见 2.5。
-- [ ] **2.2 关键帧对齐的单遍分割**（★★；依赖：2.1）。交付：默认分割模式。顺序读取一遍输入，每越过一个时长边界，就在其后第一个视频关键帧处开新段（与 FFmpeg segment muxer 的切分方式相同）。验收：片段互不重叠，按序无损拼接后与原文件包序列一致；末段、整除、过短媒体、10,000 段上限都有测试；文档写明"每段 ≥ 目标时长（末段除外），按关键帧对齐"。
+- [x] **2.2 关键帧对齐的单遍分割**（★★；依赖：2.1）。交付：默认分割模式。顺序读取一遍输入，在显示时间 ≥ 本段起点 + 目标时长的第一个视频关键帧处开新段（边界相对每段起点，保证每段不短于目标时长；FFmpeg segment muxer 按目标时长的整数倍切，会切出短段）。验收：片段互不重叠，按序无损拼接后与原文件包序列一致；末段、整除、过短媒体、段数上限（9,999，编号固定四位）都有测试；文档写明"每段 ≥ 目标时长（末段除外），按关键帧对齐"。证据：内部 `Splitter`（`split.cpp`，与裁剪共用 `remux.cpp`）；host 测试 `SplitterTest` 8 项（参数校验、命名冲突预检、发布回滚）；仪器测试 `SplitTest` 13 项，2026-10-17 在 Xiaomi M2102K1AC（API 34）全部通过（全部仪器测试 45/45）：每例逐包比对拼接结果与原文件（流、大小、关键帧、数据哈希），覆盖 3 s、2.5 s、整除 5 s、过短 20 s、1 s 每关键帧、纯视频、纯音频（按包边界，期望切点由包时间推出）、mkv 与 Unicode 前缀、上限内外、既有同名段、损坏输入与不支持的容器。另将 3 s 的 4 个分段拉回桌面，用 FFmpeg master 的 `framemd5` 核对：视频 300 包、音频 432 包与原文件逐包一致，各段严格模式解码无错误、首包为关键帧。
 - [ ] **2.3 按显式时间段分割**（★★；依赖：2.1）。交付：一个输入对应多个时间范围和多份输出；确定输出顺序与失败回滚规则。验收：每份输出独立可读；相邻范围因关键帧产生的重叠有测试，不声称精确分割。
 - [ ] **2.4 MP4/MOV edit list 起点**（★★★；依赖：2.1）。交付：可选模式，保留起点前的关键帧数据，用 edit list 让播放器从请求时间点开始显示（参考 ffmpeg CLI 输入 seek 加流复制写 MP4 的做法）。验收：Media3 ExoPlayer、系统 `MediaPlayer`、主流相册实测；不支持 edit list 的播放器行为单列；默认模式不受影响。
 - [x] **2.5 文件安全与排他交付**（★★；依赖：2.1）。交付：同文件检测、既有输出保护、同目录临时文件、失败与取消清理。验收：异常与并发写入不覆盖输入或既有文件；函数成功返回后才能读取输出；不支持硬链接时用排他创建后复制；清理失败附带诊断而不误报成功。实现：内部 `OutputDelivery`，原子发布依次尝试 `renameat2(RENAME_NOREPLACE)`（经 libc 调用，Android 11+）、硬链接，再退回 `CREATE_NEW` 复制。实测 Android 14 的 SELinux 拒绝应用对自身文件建硬链接（`AccessDeniedException`），而 `renameat2` 在内部存储与 `Android/data` 外部存储上均可用。证据：host 测试 `OutputDeliveryTest` 16 项（发布方式、复制回退、并发抢占、取消与失败清理、复制中途失败时按文件身份决定删除或保留并附诊断）；仪器测试 2026-10-17 在 Xiaomi M2102K1AC（API 34）32/32 通过，其中 `OutputDeliveryDeviceTest` 确认内部与外部存储均为 `RENAME`，`TrimTest` 新增 4 项（不留临时文件、输出即输入时输入不变、4 线程同时写同一输出仅 1 个成功且文件完整、写入外部存储）。复制回退在本机不会触发，只由 host 测试覆盖。

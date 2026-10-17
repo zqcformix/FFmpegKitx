@@ -5,185 +5,61 @@
 #include <cerrno>
 #include <climits>
 #include <deque>
-#include <memory>
 #include <string>
 #include <vector>
 
 #include "jni_util.h"
-
-extern "C" {
-#include "libavcodec/avcodec.h"
-#include "libavformat/avformat.h"
-#include "libavutil/avutil.h"
-}
+#include "remux.h"
 
 #define TAG "FFmpegKit"
 
 namespace {
 
-// Must match NativeTrimResult.REASON_* in Trimmer.kt.
-constexpr int kReasonFromCode = 0;
-constexpr int kReasonRangeOutsideMedia = 1;
-constexpr int kReasonUnsupportedMedia = 2;
-
-struct Outcome {
-    int code = 0;              // AVERROR, 0 when the failure is not an FFmpeg error
-    bool output_side = false;  // which side failed, for mapping the code
-    int reason = kReasonFromCode;
-    std::string detail;
-    int64_t actual_start_us = 0;
-    int64_t actual_end_us = 0;
-
-    bool failed() const { return code != 0 || reason != kReasonFromCode; }
-};
-
-Outcome Failure(int code, bool output_side, std::string detail) {
-    Outcome o;
-    o.code = code;
-    o.output_side = output_side;
-    o.detail = std::move(detail);
-    return o;
-}
-
-Outcome Rejected(int reason, bool output_side, std::string detail, int code = 0) {
-    Outcome o = Failure(code, output_side, std::move(detail));
-    o.reason = reason;
-    return o;
-}
-
-struct InputContext {
-    AVFormatContext* ctx = nullptr;
-    ~InputContext() { avformat_close_input(&ctx); }
-};
-
-struct OutputContext {
-    AVFormatContext* ctx = nullptr;
-    ~OutputContext() {
-        if (ctx == nullptr) return;
-        if (!(ctx->oformat->flags & AVFMT_NOFILE)) avio_closep(&ctx->pb);
-        avformat_free_context(ctx);
-    }
-};
-
-struct PacketDeleter {
-    void operator()(AVPacket* packet) const { av_packet_free(&packet); }
-};
-using Packet = std::unique_ptr<AVPacket, PacketDeleter>;
-
-struct Track {
-    int output_index = -1;  // -1: not copied
-    bool video = false;
-    bool finished = false;
-    int64_t written = 0;
-};
-
-int64_t ToMicros(int64_t ts, AVRational time_base) {
-    return av_rescale_q(ts, time_base, AV_TIME_BASE_Q);
-}
+using remux::Failure;
+using remux::Packet;
+using remux::Rejected;
+using remux::Status;
+using remux::ToMicros;
 
 class Trimmer {
 public:
-    Trimmer(const std::string& input, const std::string& output, int64_t start_us, int64_t end_us)
-        : input_path_(input), output_path_(output), start_us_(start_us), end_us_(end_us) {}
+    Trimmer(std::string input, std::string output, int64_t start_us, int64_t end_us)
+        : input_path_(std::move(input)), output_path_(std::move(output)), start_us_(start_us), end_us_(end_us) {}
 
-    Outcome Run() {
-        Outcome o = OpenInput();
-        if (o.failed()) return o;
-        o = OpenOutput();
-        if (o.failed()) return o;
-        o = CopyPackets();
-        if (o.failed()) return o;
-        return Finish();
-    }
-
-private:
-    Outcome OpenInput() {
-        int ret = avformat_open_input(&in_.ctx, input_path_.c_str(), nullptr, nullptr);
-        if (ret < 0) return Failure(ret, false, "open input");
-        ret = avformat_find_stream_info(in_.ctx, nullptr);
-        if (ret < 0) return Failure(ret, false, "read stream info");
-
-        tracks_.resize(in_.ctx->nb_streams);
-        int selected = 0;
-        for (unsigned i = 0; i < in_.ctx->nb_streams; ++i) {
-            const AVStream* st = in_.ctx->streams[i];
-            const AVMediaType type = st->codecpar->codec_type;
-            if (st->disposition & AV_DISPOSITION_ATTACHED_PIC) continue;  // cover art
-            if (type == AVMEDIA_TYPE_VIDEO) {
-                if (has_video_) {
-                    return Rejected(kReasonUnsupportedMedia, false, "more than one video stream");
-                }
-                has_video_ = true;
-                tracks_[i].video = true;
-            } else if (type != AVMEDIA_TYPE_AUDIO) {
-                continue;  // subtitles, data and attachments are not copied
-            }
-            tracks_[i].output_index = selected++;
+    Status Run() {
+        Status s = remux::OpenInput(input_path_, &in_);
+        if (s.failed()) return s;
+        if (in_.ctx->duration != AV_NOPTS_VALUE && in_.ctx->duration > 0 && start_us_ >= in_.ctx->duration) {
+            return Rejected(remux::kReasonRangeOutsideMedia, false, "start is at or beyond the end of the media");
         }
-        if (selected == 0) return Rejected(kReasonUnsupportedMedia, false, "no audio or video stream");
+        start_abs_ = in_.origin + start_us_;
+        end_abs_ = end_us_ < 0 ? INT64_MAX : in_.origin + end_us_;
 
-        origin_ = in_.ctx->start_time == AV_NOPTS_VALUE ? 0 : in_.ctx->start_time;
-        if (in_.ctx->duration != AV_NOPTS_VALUE && in_.ctx->duration > 0 &&
-            start_us_ >= in_.ctx->duration) {
-            return Rejected(kReasonRangeOutsideMedia, false, "start is at or beyond the end of the media");
-        }
-        start_abs_ = origin_ + start_us_;
-        end_abs_ = end_us_ < 0 ? INT64_MAX : origin_ + end_us_;
-        return {};
-    }
-
-    Outcome OpenOutput() {
-        int ret = avformat_alloc_output_context2(&out_.ctx, nullptr, nullptr, output_path_.c_str());
-        if (ret < 0 || out_.ctx == nullptr) {
-            return Rejected(kReasonUnsupportedMedia, true, "no container matches the output file extension", ret);
-        }
-        for (unsigned i = 0; i < in_.ctx->nb_streams; ++i) {
-            if (tracks_[i].output_index < 0) continue;
-            const AVStream* ist = in_.ctx->streams[i];
-            // 1: supported, 0: not supported, <0: unknown (header writing decides).
-            if (avformat_query_codec(out_.ctx->oformat, ist->codecpar->codec_id, FF_COMPLIANCE_NORMAL) == 0) {
-                return Rejected(kReasonUnsupportedMedia, true,
-                                std::string(avcodec_get_name(ist->codecpar->codec_id)) +
-                                    " cannot be stored in " + out_.ctx->oformat->name);
-            }
-            AVStream* ost = avformat_new_stream(out_.ctx, nullptr);
-            if (ost == nullptr) return Failure(AVERROR(ENOMEM), true, "create output stream");
-            // Also copies coded side data such as the display matrix (rotation).
-            ret = avcodec_parameters_copy(ost->codecpar, ist->codecpar);
-            if (ret < 0) return Failure(ret, true, "copy stream parameters");
-            ost->codecpar->codec_tag = 0;  // let the output container choose its own tag
-            ost->time_base = ist->time_base;
-            ost->disposition = ist->disposition;
-        }
-
+        s = remux::OpenOutput(in_, output_path_, &out_);
+        if (s.failed()) return s;
         if (start_us_ > 0) {
             // Lands on the last keyframe at or before the start; reading from the beginning is also
             // correct (packets before the start are dropped), only slower.
-            ret = avformat_seek_file(in_.ctx, -1, INT64_MIN, start_abs_, start_abs_, 0);
+            int ret = avformat_seek_file(in_.ctx, -1, INT64_MIN, start_abs_, start_abs_, 0);
             if (ret < 0) __android_log_print(ANDROID_LOG_WARN, TAG, "seek failed (%d), reading from the start", ret);
         }
-
-        if (!(out_.ctx->oformat->flags & AVFMT_NOFILE)) {
-            ret = avio_open(&out_.ctx->pb, output_path_.c_str(), AVIO_FLAG_WRITE);
-            if (ret < 0) return Failure(ret, true, "open output");
-        }
-        ret = avformat_write_header(out_.ctx, nullptr);
-        if (ret == AVERROR(EINVAL) || ret == AVERROR(ENOSYS) || ret == AVERROR_PATCHWELCOME) {
-            return Rejected(kReasonUnsupportedMedia, true,
-                            std::string(out_.ctx->oformat->name) + " cannot store these streams", ret);
-        }
-        if (ret < 0) return Failure(ret, true, "write output header");
-        return {};
+        s = CopyPackets();
+        if (s.failed()) return s;
+        return Finish();
     }
 
-    Outcome CopyPackets() {
+    int64_t actual_start_us() const { return std::max<int64_t>(0, first_abs_ - in_.origin); }  // e.g. AAC priming
+    int64_t actual_end_us() const { return std::max(last_end_abs_ - in_.origin, actual_start_us() + 1); }
+
+private:
+    Status CopyPackets() {
         Packet packet(av_packet_alloc());
         if (!packet) return Failure(AVERROR(ENOMEM), false, "allocate packet");
         while (!AllFinished()) {
             int ret = av_read_frame(in_.ctx, packet.get());
             if (ret == AVERROR_EOF) break;
             if (ret < 0) return Failure(ret, false, "read input");
-            if (tracks_[packet->stream_index].output_index < 0) {
+            if (in_.tracks[packet->stream_index].output_index < 0) {
                 av_packet_unref(packet.get());
                 continue;
             }
@@ -195,11 +71,11 @@ private:
         }
         if (!anchored_) {
             // End of input while looking for the start.
-            if (has_video_ && !has_candidate_) {
-                return Rejected(kReasonUnsupportedMedia, false, "no video keyframe in the input");
+            if (in_.has_video && !has_candidate_) {
+                return Rejected(remux::kReasonUnsupportedMedia, false, "no video keyframe in the input");
             }
             if (!has_candidate_ || pending_end_abs_ <= start_abs_) {
-                return Rejected(kReasonRangeOutsideMedia, false, "start is at or beyond the end of the media");
+                return Rejected(remux::kReasonRangeOutsideMedia, false, "start is at or beyond the end of the media");
             }
             int ret = Flush();
             if (ret < 0) return Failure(ret, true, "write output");
@@ -212,12 +88,12 @@ private:
     // Audio only: the anchor is the first packet that ends after the start.
     int FindAnchor(Packet packet) {
         const AVStream* st = in_.ctx->streams[packet->stream_index];
-        const Track& track = tracks_[packet->stream_index];
+        const remux::Track& track = in_.tracks[packet->stream_index];
         if (packet->pts != AV_NOPTS_VALUE) {
             pending_end_abs_ = std::max(pending_end_abs_, ToMicros(packet->pts + packet->duration, st->time_base));
         }
 
-        if (!has_video_) {
+        if (!in_.has_video) {
             if (packet->pts == AV_NOPTS_VALUE ||
                 ToMicros(packet->pts + packet->duration, st->time_base) <= start_abs_) {
                 return 0;
@@ -283,7 +159,7 @@ private:
     }
 
     int Emit(AVPacket* packet) {
-        Track& track = tracks_[packet->stream_index];
+        remux::Track& track = in_.tracks[packet->stream_index];
         if (track.finished) return 0;
         const AVStream* ist = in_.ctx->streams[packet->stream_index];
         const int64_t decode_ts = packet->dts != AV_NOPTS_VALUE ? packet->dts : packet->pts;
@@ -300,50 +176,33 @@ private:
             first_abs_ = std::min(first_abs_, ToMicros(packet->pts, ist->time_base));
             last_end_abs_ = std::max(last_end_abs_, ToMicros(packet->pts + packet->duration, ist->time_base));
         }
-        // Every stream moves by the same amount, so audio and video keep their relative timing.
-        const int64_t offset = av_rescale_q(anchor_pts_, anchor_time_base_, ist->time_base);
-        if (packet->pts != AV_NOPTS_VALUE) packet->pts -= offset;
-        if (packet->dts != AV_NOPTS_VALUE) packet->dts -= offset;
-        const AVStream* ost = out_.ctx->streams[track.output_index];
-        av_packet_rescale_ts(packet, ist->time_base, ost->time_base);
-        packet->stream_index = track.output_index;
-        packet->pos = -1;
         ++track.written;
-        return av_interleaved_write_frame(out_.ctx, packet);
+        // Every stream moves by the same amount, so audio and video keep their relative timing.
+        return remux::WritePacket(in_, &out_, packet, anchor_pts_, anchor_time_base_);
     }
 
     bool AllFinished() const {
-        for (const Track& track : tracks_) {
+        for (const remux::Track& track : in_.tracks) {
             if (track.output_index >= 0 && !track.finished) return false;
         }
         return true;
     }
 
-    Outcome Finish() {
+    Status Finish() {
         int64_t total = 0;
-        for (unsigned i = 0; i < tracks_.size(); ++i) {
-            if (tracks_[i].output_index < 0) continue;
-            total += tracks_[i].written;
+        for (const remux::Track& track : in_.tracks) {
+            if (track.output_index >= 0) total += track.written;
         }
         if (total == 0) {
-            return Rejected(kReasonRangeOutsideMedia, false, "no packets in the requested range");
+            return Rejected(remux::kReasonRangeOutsideMedia, false, "no packets in the requested range");
         }
-        for (unsigned i = 0; i < tracks_.size(); ++i) {
-            if (tracks_[i].output_index >= 0 && tracks_[i].written == 0) {
-                return Rejected(kReasonUnsupportedMedia, false,
+        for (unsigned i = 0; i < in_.tracks.size(); ++i) {
+            if (in_.tracks[i].output_index >= 0 && in_.tracks[i].written == 0) {
+                return Rejected(remux::kReasonUnsupportedMedia, false,
                                 "stream " + std::to_string(i) + " has no packets in the requested range");
             }
         }
-        int ret = av_write_trailer(out_.ctx);
-        if (ret < 0) return Failure(ret, true, "write output trailer");
-        if (!(out_.ctx->oformat->flags & AVFMT_NOFILE)) {
-            ret = avio_closep(&out_.ctx->pb);  // reports flush errors such as a full disk
-            if (ret < 0) return Failure(ret, true, "close output");
-        }
-        Outcome o;
-        o.actual_start_us = std::max<int64_t>(0, first_abs_ - origin_);  // e.g. AAC priming before the start
-        o.actual_end_us = std::max(last_end_abs_ - origin_, o.actual_start_us + 1);
-        return o;
+        return remux::CloseOutput(&out_);
     }
 
     const std::string input_path_;
@@ -351,11 +210,8 @@ private:
     const int64_t start_us_;
     const int64_t end_us_;
 
-    InputContext in_;
-    OutputContext out_;
-    std::vector<Track> tracks_;
-    bool has_video_ = false;
-    int64_t origin_ = 0;
+    remux::Input in_;
+    remux::Output out_;
     int64_t start_abs_ = 0;
     int64_t end_abs_ = INT64_MAX;
 
@@ -372,6 +228,7 @@ private:
 
 }  // namespace
 
+// Returns a NativeRemuxStatus whose times are [actual start, actual end) in microseconds.
 extern "C" JNIEXPORT jobject JNICALL
 Java_io_github_nova_ffmpegkit_NativeTrim_trim(
         JNIEnv* env,
@@ -381,13 +238,8 @@ Java_io_github_nova_ffmpegkit_NativeTrim_trim(
         jlong start_us,
         jlong end_us) {
     Trimmer trimmer(ToUtf8Path(env, input), ToUtf8Path(env, output), start_us, end_us);
-    const Outcome o = trimmer.Run();
-
-    jclass result_class = env->FindClass("io/github/nova/ffmpegkit/NativeTrimResult");
-    if (result_class == nullptr) return nullptr;
-    jmethodID constructor = env->GetMethodID(result_class, "<init>", "(IZILjava/lang/String;JJ)V");
-    if (constructor == nullptr) return nullptr;
-    jstring detail = o.detail.empty() ? nullptr : env->NewStringUTF(o.detail.c_str());
-    return env->NewObject(result_class, constructor, o.code, o.output_side, o.reason, detail,
-                          static_cast<jlong>(o.actual_start_us), static_cast<jlong>(o.actual_end_us));
+    const Status status = trimmer.Run();
+    std::vector<int64_t> times;
+    if (!status.failed()) times = {trimmer.actual_start_us(), trimmer.actual_end_us()};
+    return remux::ToJava(env, status, times);
 }

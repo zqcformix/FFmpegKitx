@@ -120,3 +120,31 @@ Java_io_github_nova_ffmpegkit_NativeInspector_inspect(
     avformat_close_input(&ctx);
     return ToArray(env, values);
 }
+
+// Every packet in read order: status, then per packet stream_index, size, keyframe (0/1), FNV-1a hash
+// of the data. Used to check that split segments hold exactly the input's packets.
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_io_github_nova_ffmpegkit_NativeInspector_packets(
+        JNIEnv* env,
+        jobject /* this */,
+        jbyteArray path) {
+    const std::string file = ToUtf8Path(env, path);
+    AVFormatContext* ctx = nullptr;
+    int ret = avformat_open_input(&ctx, file.c_str(), nullptr, nullptr);
+    if (ret < 0) return ToArray(env, {ret});
+    std::vector<jlong> values = {0};
+    AVPacket* packet = av_packet_alloc();
+    while ((ret = av_read_frame(ctx, packet)) >= 0) {
+        uint64_t hash = 1469598103934665603ULL;
+        for (int i = 0; i < packet->size; ++i) {
+            hash = (hash ^ packet->data[i]) * 1099511628211ULL;
+        }
+        values.insert(values.end(), {packet->stream_index, packet->size, (packet->flags & AV_PKT_FLAG_KEY) ? 1 : 0,
+                                     static_cast<jlong>(hash)});
+        av_packet_unref(packet);
+    }
+    if (ret != AVERROR_EOF) values[0] = ret;
+    av_packet_free(&packet);
+    avformat_close_input(&ctx);
+    return ToArray(env, values);
+}

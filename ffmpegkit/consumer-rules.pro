@@ -3,7 +3,7 @@
 -keepclasseswithmembernames,includedescriptorclasses class io.github.nova.ffmpegkit.** {
     native <methods>;
 }
-# Constructed from trim.cpp.
--keep class io.github.nova.ffmpegkit.NativeTrimResult {
-    <init>(int, boolean, int, java.lang.String, long, long);
+# Constructed from remux.cpp.
+-keep class io.github.nova.ffmpegkit.NativeRemuxStatus {
+    <init>(int, boolean, int, java.lang.String, long[]);
 }
