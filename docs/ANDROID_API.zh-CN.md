@@ -1,6 +1,6 @@
 # Android 编辑 API 设计（M1 草案）
 
-> **状态：设计草案，大部分尚未实现。** 第 2 节的 `TimeRange` 和第 6 节的 `FFmpegException` 已在 `main` 实现（未发布）；其余接口当前源码中不存在，示例无法编译。已发布的 `v1.0.3` 只包含 `FFmpegKit` 信息查询接口。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
+> **状态：设计草案，大部分尚未实现。** 第 2 节的 `TimeRange` 和第 6 节的 `FFmpegException` 已在 `main` 实现（未发布）；第 3 节的裁剪行为已有内部实现，公开入口尚不存在；其余接口当前源码中不存在，示例无法编译。已发布的 `v1.0.3` 只包含 `FFmpegKit` 信息查询接口。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
 
 本文是 M1 范围、行为与限制的唯一出处；其他文档只引用，不复述。
 
@@ -60,6 +60,9 @@ suspend fun trimFromUri(context: Context, uri: Uri, output: File) = FFmpeg.trim(
 ```
 
 - 快速模式复制压缩包，不重新编码。起点回退到前一个关键帧，所以 `actualRange.start` 可能早于请求；B 帧解码顺序可能让尾部略长。音视频保持共同的时间偏移。
+  - 视频从起点之前（含起点）最近的关键帧开始；早于该关键帧的音频包丢弃。纯音频从包含起点的那个包开始。
+  - 每条流在第一个解码时间（dts）达到终点的包处停止，与 `ffmpeg -c copy` 一致。尾部可能出现显示时间超过终点的 P 帧，而它前面的个别 B 帧缺失。
+  - `requestedRange` 与 `actualRange` 都以输入的起始时间（`start_time`）为零点。`actualRange` 取写入包的最早显示时间与最晚结束时间；早于零点的包（如 AAC priming）按 0 计。MP4 报告的 `duration` 是各帧时长之和，可能比 `actualRange` 略短。
 - MP4/MOV 计划提供可选的 edit list 模式（路线图 2.4，评估中）：保留前导关键帧，让支持 edit list 的播放器从请求时间点开始显示。
 - 输出扩展名决定容器；源编码必须与该容器兼容。改扩展名不等于转码。
 - 需要帧精确边界时使用精确裁剪（路线图 10.1）。
