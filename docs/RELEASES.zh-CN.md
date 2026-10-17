@@ -6,7 +6,7 @@
 
 | 平台 | 当前状态 | 渠道与拟定坐标 |
 | --- | --- | --- |
-| Android | JitPack `com.github.zqcformix:FFmpegKitx:v1.0.3`，只含信息查询 API；编辑 API 未实现 | 继续使用 JitPack。若迁移到 Maven Central，groupId 用 `io.github.zqcformix`（可通过 GitHub 账号验证命名空间），artifactId 拟为 `ffmpegkitx-android` |
+| Android | JitPack `com.github.zqcformix:FFmpegKitx:v1.1.0`（发布中，见第 6 节）：编辑 API（裁剪、分割、探测）与信息查询 API；上一版 `v1.0.3` 只含信息查询 API | 继续使用 JitPack。若迁移到 Maven Central，groupId 用 `io.github.zqcformix`（可通过 GitHub 账号验证命名空间），artifactId 拟为 `ffmpegkitx-android` |
 | iOS / macOS（M4） | 未开始 | SwiftPM：本仓库的 `Package.swift` 加二进制 `FFmpegKitxCore.xcframework`，通过 Git URL + tag 引入 |
 | HarmonyOS（M4） | 未开始 | OHPM 包 `@ffmpegkitx/harmony` + HAR，发布到 <https://ohpm.openharmony.cn/>；scope 未注册 |
 | Linux / Windows（远期候选） | 未排期 | `ffmpegkitx-core` 原生归档 + CMake config，放在本仓库 GitHub Releases |
@@ -32,7 +32,7 @@
 
    `publishToMavenLocal` 只生成本地内容，不等于发布远端包。所有 Maven 发布任务都会先运行 `verifyNativeAlignment`，JitPack 构建也一样。设备侧验证库加载、真实剪辑与分割、异常路径、长任务资源释放和最低支持版本。
 3. **产物记录**：计算 SHA-256；生成组件清单或 SPDX/CycloneDX SBOM；保留原始构建日志、构建配置、工具链版本和来源定位。
-4. **消费者验证**：在空白消费者工程中用拟发布坐标构建；检查传递依赖、R8/ProGuard、打包后的 `.so`、sources/Javadoc 和 POM。
+4. **消费者验证**：在空白消费者工程中用拟发布坐标构建；检查传递依赖、R8/ProGuard、打包后的 `.so`、sources/Javadoc 和 POM。消费者工程须用 Kotlin 并采用新建工程的默认配置（当前为 AGP 9 内置 Kotlin），Java 工程发现不了 Kotlin 元数据版本过新之类的问题（见第 6 节）。
 5. **发布说明**：写清新增 API、行为变化、兼容性、限制、迁移示例和验证范围。签名与凭据由发布环境安全注入。
 
 ## 3. 原生二进制与 Android 兼容性
@@ -91,5 +91,15 @@ Google Play 自 2025-11-01 起要求面向 Android 15+ 的新应用和更新支�
 - [x] 根目录补齐 LICENSE（MIT 正文与权利人）
 - [x] 新增第三方声明文件，包含 FFmpeg、libass、FreeType、FriBidi、HarfBuzz 的许可文本与版权声明。FreeType 版本未记录在二进制中，HarfBuzz 版本（10.1.0）是从字符串推断的，补齐来源记录时一并核实
 - [ ] 为每个预编译二进制建立来源、源码/补丁、构建配方、SHA-256 与组件清单的对应记录（当前缺少完整的可复建来源链，`build_android.sh` 也不在仓库中，见路线图 7.1）
-- [x] 统一 `versionName` 与发布标签（`1.0.3`）
+- [x] 统一 `versionName` 与发布标签（`1.0.3`；`1.1.0`）
 - [ ] 实际发布后，把本文的规划坐标替换为真实包名、版本与可访问地址，并更新各平台的使用示例
+
+## 6. 发布记录
+
+### v1.1.0（首个编辑版本，路线图 4.4）
+
+- **内容**：编辑 API——`FFmpeg.trim`（含 `TrimMode.EDIT_LIST`）、`FFmpeg.split`（`SplitRequest.byDuration`/`byRanges`）、`FFmpeg.probe`，`File`/`Uri` 扩展，`MediaInput`/`MediaOutput`，`FFmpegException`；行为与限制见 [Android 编辑 API 设计](ANDROID_API.zh-CN.md)。信息查询 API 不变。预编译 FFmpeg `.so` 与 v1.0.3 相同，第三方声明不变。
+- **兼容性**：本库以 Kotlin 2.2 元数据发布（`languageVersion`/`apiVersion` 2.2、`kotlin-stdlib` 2.2.20），消费者需要 Kotlin 2.1+；AAR 的 `minCompileSdk` 为 26；不再依赖 `androidx.core`。v1.0.3 以 Kotlin 2.4 元数据发布，AGP 9 默认工程（Kotlin 2.2）无法编译使用它的 Kotlin 代码。
+- **发布前验证**（2026-10-18，本地 Maven 产物 `com.github.zqcformix:ffmpegkit:1.1.0`）：空白消费者工程（AGP 9.4.1、内置 Kotlin 2.2.10、compileSdk 36、minSdk 26、R8 release）编译 README 与本地接入文档中的全部示例；release 包在 x86_64 模拟器（API 35）上裁剪 [2 s, 8 s) 得到 [2 s, 8.133 s)、按 3 s 分割出 4 段；APK 中 21 个 `.so` 通过 `zipalign -c -P 16`；库的全部仪器测试在模拟器与 Xiaomi M2102K1AC 上 90/90，host 测试 63/63，`verifyNativeAlignment` 通过（14 个 64 位 `.so`）。
+- **发布后验证**：待打标签后从 JitPack 解析 `v1.1.0` 补记。
+
