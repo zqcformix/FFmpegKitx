@@ -5,18 +5,27 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.PrimaryTabRow
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
+import io.github.nova.ffmpegkit.editor.EditorScreen
 import io.github.nova.ffmpegkit.theme.FFmpegKitTheme
 
 class MainActivity : ComponentActivity() {
@@ -31,7 +40,24 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             FFmpegKitTheme {
-                FFmpegInfoScreen(
+                DemoScreen()
+            }
+        }
+    }
+}
+
+@Composable
+private fun DemoScreen() {
+    var tab by rememberSaveable { mutableIntStateOf(0) }
+    Scaffold { innerPadding ->
+        Column(Modifier.padding(innerPadding)) {
+            PrimaryTabRow(selectedTabIndex = tab) {
+                Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Edit") })
+                Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("FFmpeg info") })
+            }
+            when (tab) {
+                0 -> EditorScreen()
+                else -> FFmpegInfoScreen(
                     version = FFmpegKit.getVersion(),
                     buildConfig = FFmpegKit.getBuildConfiguration(),
                     libassStatus = FFmpegKit.checkLibassAvailability()
@@ -52,15 +78,6 @@ private fun FFmpegInfoScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        item {
-            Text(
-                text = "FFmpeg Integration Test",
-                style = MaterialTheme.typography.headlineMedium,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(top = 48.dp, bottom = 8.dp)
-            )
-        }
-
         item {
             InfoSection(title = "FFmpeg Version", content = version)
         }
