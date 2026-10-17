@@ -29,7 +29,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
     native-lib.cpp
     errors.cpp
     trim.cpp
-    inspect.cpp)
+    inspect.cpp
+    files.cpp)
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${FFMPEG_INCLUDE_DIR})
@@ -42,4 +43,5 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     swresample
     swscale
     android
+    dl
     log)

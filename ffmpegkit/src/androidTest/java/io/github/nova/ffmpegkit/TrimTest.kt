@@ -4,6 +4,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.nova.ffmpegkit.FFmpegException.Reason
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.time.Duration.Companion.microseconds
 import kotlin.time.Duration.Companion.milliseconds
@@ -167,6 +169,69 @@ class TrimTest {
         }
         assertEquals(Reason.UNSUPPORTED_MEDIA, e.reason)
         assertFalse(output.exists())
+    }
+
+    @Test
+    fun leavesNoTemporaryFiles() {
+        val input = sample(AV)
+        Trimmer.trim(input, out("ok.mp4"), TimeRange(2.seconds, 3.seconds))
+        assertThrows(FFmpegException::class.java) {
+            Trimmer.trim(input, out("bad.notacontainer"), TimeRange(2.seconds, 3.seconds))
+        }
+        assertThrows(FFmpegException::class.java) {
+            Trimmer.trim(input, out("late.mp4"), TimeRange.from(20.seconds))
+        }
+        assertEquals(setOf(AV, "out-ok.mp4"), dir.list()!!.toSet())
+    }
+
+    @Test
+    fun outputThatIsTheInputLeavesTheInputUntouched() {
+        val input = sample(AV)
+        val before = input.readBytes()
+        val e = assertThrows(FFmpegException::class.java) {
+            Trimmer.trim(input, File(input.path), TimeRange(2.seconds, 3.seconds))
+        }
+        assertEquals(Reason.OUTPUT_EXISTS, e.reason)
+        assertArrayEquals(before, input.readBytes())
+    }
+
+    @Test
+    fun concurrentTrimsToTheSameOutputNeverOverwrite() {
+        val input = sample(AV)
+        val output = out("race.mp4")
+        val start = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(4)
+        val outcomes = try {
+            (1..4).map { second ->
+                pool.submit<Result<TrimResult>> {
+                    start.await()
+                    runCatching { Trimmer.trim(input, output, TimeRange(second.seconds, (second + 1).seconds)) }
+                }
+            }.also { start.countDown() }.map { it.get() }
+        } finally {
+            pool.shutdown()
+        }
+        assertEquals(outcomes.toString(), 1, outcomes.count { it.isSuccess })
+        outcomes.filter { it.isFailure }.forEach {
+            assertEquals(Reason.OUTPUT_EXISTS, (it.exceptionOrNull() as FFmpegException).reason)
+        }
+        // Every candidate range is one whole GOP, so the published file must be one complete output.
+        val video = MediaInspector.inspect(output).streams.single { it.isVideo }
+        assertDecodable(video, packets = 32)
+        assertEquals(setOf(AV, "out-race.mp4"), dir.list()!!.toSet())
+    }
+
+    @Test
+    fun trimsIntoExternalStorage() {
+        val external = InstrumentationRegistry.getInstrumentation().targetContext.getExternalFilesDir(null) ?: return
+        val externalDir = File(external, "trim-test").apply { deleteRecursively(); mkdirs() }
+        try {
+            val result = Trimmer.trim(sample(AV), File(externalDir, "clip.mp4"), TimeRange(3.seconds, 4.seconds))
+            assertAudioVideo(result, videoPackets = 32, keyframes = 2, audioPackets = 43)
+            assertEquals(listOf("clip.mp4"), externalDir.list()!!.toList())
+        } finally {
+            externalDir.deleteRecursively()
+        }
     }
 
     private fun assertAudioVideo(result: TrimResult, videoPackets: Long, keyframes: Long, audioPackets: Long) {

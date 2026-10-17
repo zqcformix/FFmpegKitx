@@ -17,43 +17,28 @@ internal class TrimResult(
 
 /**
  * Fast (stream copy) trimming of local files. Blocking; the public suspend entry point is roadmap
- * 4.2. Writes [output] directly: the temp-file delivery of roadmap 2.5 is not in place yet.
+ * 4.2. The output is written to a temporary file and published by [OutputDelivery], so an existing
+ * file is never replaced and [output] only appears once complete (or, on storage without hard links,
+ * is complete when this returns).
  */
 internal object Trimmer {
 
     fun trim(input: File, output: File, range: TimeRange): TrimResult {
-        mapIoFailures(MediaRole.OUTPUT, "create output $output") {
-            if (!output.createNewFile()) {
-                throw FFmpegException(Reason.OUTPUT_EXISTS, "output already exists: $output")
-            }
-        }
-        val result = try {
-            NativeTrim.trim(
+        val result = OutputDelivery.deliver(input, output) { temp ->
+            val result = NativeTrim.trim(
                 input.path.toByteArray(),
-                output.path.toByteArray(),
+                temp.path.toByteArray(),
                 range.startMicros,
                 range.endExclusiveMicros ?: -1,
             )
-        } catch (e: Throwable) {
-            deleteCreatedOutput(output, e)
-            throw e
-        }
-        if (result.failed) {
-            val failure = result.toException(input, output)
-            deleteCreatedOutput(output, failure)
-            throw failure
-        }
+            if (result.failed) throw result.toException(input, output)
+            result
+        }.value
         return TrimResult(
             requestedRange = range,
             actualRange = TimeRange(result.actualStartUs.microseconds, result.actualEndUs.microseconds),
             output = output,
         )
-    }
-
-    private fun deleteCreatedOutput(output: File, failure: Throwable) {
-        if (output.exists() && !output.delete()) {
-            failure.addSuppressed(FFmpegException(Reason.IO, "could not delete incomplete output $output"))
-        }
     }
 
     private fun NativeTrimResult.toException(input: File, output: File): FFmpegException {
