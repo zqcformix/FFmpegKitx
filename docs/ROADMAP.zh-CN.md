@@ -15,9 +15,9 @@
 
 完成一项或改变计划时更新本节，新的会话从这里接手。
 
-- **当前阶段**：M1 进行中。已完成 1.1（README 能力清单与非目标）、4.1（`TimeRange`）和 4.3（`FFmpegException` 错误模型），均未发布。
-- **最近完成**：2026-10-17 完成 4.3。内部的 `mapIoFailures`、`nativeFailure` 与 `AvError.reasonOf` 负责把 Java I/O 异常与 `AVERROR` 转成 `FFmpegException`，后续的媒体操作都应通过它们报错。上一次发布是 2026-10-08 的 `v1.0.3`，记录见 [发布文档](RELEASES.zh-CN.md) 3.1。
-- **下一步**：2.1（快速时间裁剪）。开工前先准备 2.6 所需的生成样本，供 host 与设备测试使用。
+- **当前阶段**：M1 进行中。已完成 1.1、4.1、4.3 和 2.1（快速时间裁剪，目前只有内部的阻塞入口 `Trimmer.trim(File, File, TimeRange)`），均未发布。
+- **最近完成**：2026-10-17 完成 2.1。2.6 的生成样本已就位（`scripts/generate-test-media.ps1` → `ffmpegkit/src/androidTest/assets/media/`，含音视频、纯视频、纯音频），`MediaInspector` 可全量解码核对输出；长 GOP、非零起始时间、VFR 样本还没有。上一次发布是 2026-10-08 的 `v1.0.3`，记录见 [发布文档](RELEASES.zh-CN.md) 3.1。
+- **下一步**：2.5（文件安全与排他交付）：`Trimmer` 现在直接写目标文件，失败时删除本次创建的文件；改为同目录临时文件加排他交付，2.2 分割和 3.1 `Uri` 输出都依赖它。之后做 2.2（关键帧对齐分割）和 3.1。
 - **验证环境**：Xiaomi M2102K1AC（Android 14，API 34，arm64-v8a）真机；AVD `375x812_Unit_IN`。
 
 ## 当前基线
@@ -60,7 +60,7 @@
 
 ### 第 2 章　快速时间裁剪与分割
 
-- [ ] **2.1 快速时间裁剪**（★★；依赖：1.1、4.1）。交付：基于 libavformat 的 seek、流映射、时间戳重标定与 remux；结果同时返回 `requestedRange` 和实际首末包时间 `actualRange`；终点可省略（到媒体结尾）。验收：带音视频样本可解封装和解码，音画同步保持；`actualRange` 与 FFprobe 结果一致。
+- [x] **2.1 快速时间裁剪**（★★；依赖：1.1、4.1）。交付：基于 libavformat 的 seek、流映射、时间戳重标定与 remux；结果同时返回 `requestedRange` 和实际首末包时间 `actualRange`；终点可省略（到媒体结尾）。验收：带音视频样本可解封装和解码，音画同步保持；`actualRange` 与 FFprobe 结果一致。证据：内部 `Trimmer`（`trim.cpp`）与仪器测试 `TrimTest` 14 项，2026-10-17 在 Xiaomi M2102K1AC（arm64-v8a，API 34）全部通过。样本由 `scripts/generate-test-media.ps1` 生成（H.264 带 B 帧、每秒一个关键帧，AAC 带 priming）；期望的 `actualRange` 与各流包数由 `ffprobe -show_packets` 推出，测试逐项相等，并用 `MediaInspector` 全量解码确认零错误、音视频起点相差不足一个 AAC 帧。另将三个设备输出拉回桌面，用 FFmpeg master 的 `ffprobe` 与 `-err_detect explode` 完整解码复核，包数一致、无错误、首包为关键帧。公开的挂起入口见 4.2，临时文件交付见 2.5。
 - [ ] **2.2 关键帧对齐的单遍分割**（★★；依赖：2.1）。交付：默认分割模式。顺序读取一遍输入，每越过一个时长边界，就在其后第一个视频关键帧处开新段（与 FFmpeg segment muxer 的切分方式相同）。验收：片段互不重叠，按序无损拼接后与原文件包序列一致；末段、整除、过短媒体、10,000 段上限都有测试；文档写明"每段 ≥ 目标时长（末段除外），按关键帧对齐"。
 - [ ] **2.3 按显式时间段分割**（★★；依赖：2.1）。交付：一个输入对应多个时间范围和多份输出；确定输出顺序与失败回滚规则。验收：每份输出独立可读；相邻范围因关键帧产生的重叠有测试，不声称精确分割。
 - [ ] **2.4 MP4/MOV edit list 起点**（★★★；依赖：2.1）。交付：可选模式，保留起点前的关键帧数据，用 edit list 让播放器从请求时间点开始显示（参考 ffmpeg CLI 输入 seek 加流复制写 MP4 的做法）。验收：Media3 ExoPlayer、系统 `MediaPlayer`、主流相册实测；不支持 edit list 的播放器行为单列；默认模式不受影响。
