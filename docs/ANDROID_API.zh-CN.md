@@ -65,6 +65,7 @@ suspend fun trimFromUri(context: Context, uri: Uri, output: File) = FFmpeg.trim(
   - `requestedRange` 与 `actualRange` 都以输入的起始时间（`start_time`）为零点。`actualRange` 取写入包的最早显示时间与最晚结束时间；早于零点的包（如 AAC priming）按 0 计。MP4 报告的 `duration` 是各帧时长之和，可能比 `actualRange` 略短。
 - MP4/MOV 计划提供可选的 edit list 模式（路线图 2.4，评估中）：保留前导关键帧，让支持 edit list 的播放器从请求时间点开始显示。
 - 输出扩展名决定容器；源编码必须与该容器兼容。改扩展名不等于转码。
+- 没有索引的输入（MPEG-TS、ADTS 等裸流）只能按字节位置 seek，可能落在所需关键帧（或包含起点的音频包）之后。此时依次在起点前 1、2、4…… s 处重新 seek，最后从输入开头读取，结果与从头读取完全相同，只是更慢；有索引的 MP4、Matroska 不受影响。
 - 需要帧精确边界时使用精确裁剪（路线图 10.1）。
 
 ## 4. 分割
