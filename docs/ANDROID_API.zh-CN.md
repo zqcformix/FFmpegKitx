@@ -1,6 +1,6 @@
 # Android 编辑 API 设计（M1 草案）
 
-> **状态：大部分已在 `main` 实现，尚未发布。** 已实现：`FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`、`TrimRequest`（含 `TrimMode`）、`SplitRequest.byDuration`/`byRanges`、`MediaInput`/`MediaOutput`、`File`/`Uri` 的 `trimTo`/`splitTo`/`probe` 扩展、`MediaInfo`/`StreamInfo`、`TimeRange`、`FFmpegException`，以及第 3、4、7、8 节的行为和协程取消。**未实现**：第 5 节的进度回调与 `MediaProgress`（路线图 5.2），因此第 5 节示例无法编译；交付复制阶段的取消（5.3）。已发布的 `v1.0.3` 只包含 `FFmpegKit` 信息查询接口。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
+> **状态：已随 `v1.1.0` 发布（2026-10-18）。** 已实现：`FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`、`TrimRequest`（含 `TrimMode`）、`SplitRequest.byDuration`/`byRanges`、`MediaInput`/`MediaOutput`、`File`/`Uri` 的 `trimTo`/`splitTo`/`probe` 扩展、`MediaInfo`/`StreamInfo`、`TimeRange`、`FFmpegException`，以及第 3、4、7、8 节的行为和协程取消。**未实现**：第 5 节的进度回调与 `MediaProgress`（路线图 5.2），因此第 5 节示例无法编译；交付复制阶段的取消（5.3）。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
 
 本文是 M1 范围、行为与限制的唯一出处；其他文档只引用，不复述。
 

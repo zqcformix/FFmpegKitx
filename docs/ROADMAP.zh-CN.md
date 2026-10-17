@@ -15,21 +15,21 @@
 
 完成一项或改变计划时更新本节，新的会话从这里接手。
 
-- **当前阶段**：M1 收尾。已完成 1.1、1.2、2.1–2.6、3.1、3.2、4.1–4.3，剩余 4.4（首个编辑版本 `v1.1.0` 发布）。公开入口：`FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`，以及 `File`/`Uri` 的 `trimTo`/`splitTo`/`probe`。
-- **最近完成**：2026-10-17 完成 2.4（#23，`TrimMode.EDIT_LIST`，ExoPlayer、小米相册遵循 edit list，系统 `MediaPlayer` 不遵循）与 1.2（#22，本地接入文档；验证中修复了 AGP 9 默认工程无法编译本库的 Kotlin 元数据与 compileSdk 问题）；此前完成 2.6（#21，回归样本，修复无索引输入裁剪起点越过关键帧）、3.2、2.3、3.1。小米真机每次安装 APK 都需要在手机上确认，无人值守时用模拟器（设 `ANDROID_SERIAL=emulator-5554`）。上一次发布是 2026-10-08 的 `v1.0.3`，记录见 [发布文档](RELEASES.zh-CN.md) 3.1。
-- **下一步**：4.4——发布准备已合入后在 `main` 上打 `v1.1.0` 标签，用空白 Kotlin 消费者工程从 JitPack 解析新版本，在 ARM64 真机与 x86_64 模拟器上运行裁剪/分割，记录后勾选 4.4、创建 GitHub Release。M1 完成后进入 M2（第 5 章会话与进度起）。
+- **当前阶段**：M1 已完成，首个编辑版本 `v1.1.0` 于 2026-10-18 发布（JitPack 与 GitHub Release）。下一阶段为 M2 可靠内核。
+- **最近完成**：2026-10-18 完成 4.4：`v1.1.0` 发布，从 JitPack 解析后在 ARM64 真机与 x86_64 模拟器上运行裁剪/分割（记录见 4.4 与[发布文档](RELEASES.zh-CN.md)第 6 节）。此前完成 2.4（#23）、1.2（#22）、2.6（#21）、3.2、2.3、3.1。小米真机每次安装 APK 都需要在手机上确认，无人值守时用模拟器（设 `ANDROID_SERIAL=emulator-5554`）。
+- **下一步**：M2 从第 5 章开始——5.1 会话状态机与 5.2 结构化进度（编辑 API 目前没有进度回调）；5.3 中交付复制阶段的取消也尚未实现。
 - **验证环境**：Xiaomi M2102K1AC（Android 14，API 34，arm64-v8a）真机；AVD `375x812_Unit_IN`。
 
 ## 当前基线
 
-核对日期 2026-10-08，对应 `main` 提交 `c32dc8a`（`v1.0.3`）。
+核对日期 2026-10-18，对应 `main` 提交 `d167708`（`v1.1.0`）。
 
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
 | FFmpeg 信息查询 | 已有 | `FFmpegKit.getVersion()`、`getBuildConfiguration()`、`isLibassAvailable()`、`checkLibassAvailability()`、`printInfo()` |
 | 预编译 FFmpeg 8.0.1 | 已有 | arm64-v8a、armeabi-v7a、x86_64；18 个 `.so` 的 LOAD 段对齐均 ≥ 16 KB |
-| JitPack 发布 | 已有 | 最新 `v1.0.3`，只包含信息查询 API；全部 64 位 `.so` 满足 16 KB 对齐 |
-| 时间裁剪、分割等编辑能力 | 未实现 | 设计见 [Android 编辑 API 设计](ANDROID_API.zh-CN.md) |
+| JitPack 发布 | 已有 | 最新 `v1.1.0`（2026-10-18），含编辑 API 与信息查询 API；全部 64 位 `.so` 满足 16 KB 对齐 |
+| 时间裁剪、分割与探测 | 已有（`v1.1.0`） | 流复制裁剪（可选 MP4 edit list 起点）、按时长或时间段分割、结构化 probe；行为与限制见 [Android 编辑 API 设计](ANDROID_API.zh-CN.md) |
 | 通用 FFmpeg/FFprobe 命令执行 | 未实现 | 存在 `libav*` 库不等于存在可调用的 `ffmpeg main()`，见 6.3 |
 | iOS、HarmonyOS 及其他平台 | 未开始 | 见第四、五卷 |
 
@@ -77,7 +77,7 @@
 - [x] **4.1 `Duration` 与强类型范围**（★；依赖：1.1）。交付：`TimeRange(start, endExclusive)`，终点可省略；拒绝负数、无穷值、溢出和非整数微秒。验收：非法值在执行前抛 `IllegalArgumentException`。证据：`ffmpegkit/src/test/.../TimeRangeTest.kt` 13 项 host 测试（`:ffmpegkit:testDebugUnitTest`）覆盖各类非法值与边界。
 - [x] **4.2 挂起函数与扩展**（★★；依赖：2.1、3.1）。交付：`FFmpeg.trim`/`FFmpeg.split` 挂起入口，`File` 与 `Uri` 扩展，自动切换到 IO 调度器。验收：主线程不做媒体 I/O；协程取消会通知原生任务，清理完成后才结束。证据：公开 API（`FFmpeg`、`TrimRequest`、`SplitRequest.byDuration`、`MediaInput`、`MediaOutput`、结果类型与 `trimTo`/`splitTo` 扩展）；取消标志经 `interrupt_callback` 与包循环检查传到原生层（`NativeCancellation`、`runNative`）。仪器测试 `FFmpegApiTest` 7 项，2026-10-17 在 x86_64 模拟器（API 35）与 Xiaomi M2102K1AC（API 34）上均通过（全部仪器测试 62/62）：从主线程调用时工作在其他线程执行；扩展与参数校验；失败以 `FFmpegException` 抛出；用每次读取延迟 150 ms 的代理描述符在第 2 次读取后取消裁剪与分割，结果是原样的 `CancellationException`，协程结束后不再有读取（完整运行需 4 次读取，取消后为 2 次），且没有输出或临时文件残留。进度回调属于 5.2，不在本项范围。
 - [x] **4.3 错误模型**（★★；依赖：4.1）。交付：`FFmpegException` 带 `reason` 枚举和原生错误码；取消不包装。验收：输入缺失、权限、已有输出、不支持的媒体、损坏媒体、原生错误均可区分；**首次发布前冻结**，之后只增不改。证据：host 测试 `ErrorMappingTest`（14 项）与 `FFmpegExceptionTest`（4 项，其中一项锁定 `Reason` 的名称与顺序）；仪器测试 `PackagedErrorsTest` 7 项，2026-10-17 在 Xiaomi M2102K1AC（arm64-v8a，API 34）通过，核对映射表与 FFmpeg 头文件中的 `AVERROR` 值一致，并在真实文件上区分输入缺失、无读权限、输出已存在、输出目录缺失与只读目录。实际媒体操作中的不支持/损坏媒体由 2.1 与 2.6 的媒体测试覆盖。
-- [ ] **4.4 首个编辑版本发布**（★★；依赖：2.6、4.1–4.3）。交付：按[发布清单](RELEASES.zh-CN.md)统一版本号、使用固定的 NDK、通过 `verifyNativeAlignment`、补齐 LICENSE 与第三方声明。验收：空白消费者工程从 JitPack 解析新版本，并在 ARM64 真机与 x86_64 模拟器上运行 trim/split。**进度**：发布准备待合入——`versionName` 1.1.0（`versionCode` 5），README 加入编辑 API 与消费者要求（Kotlin 2.1+、compileSdk ≥ 26）；预编译 `.so` 未变，第三方声明无需更新。发布前用本地 Maven 产物验证：空白消费者工程（AGP 9.4.1、内置 Kotlin 2.2.10、compileSdk 36、R8 release）编译 README 与[本地接入](LOCAL_INTEGRATION.zh-CN.md)中的全部示例，release 包在 x86_64 模拟器（API 35）上裁剪、分割通过，APK 中 21 个 `.so` 通过 `zipalign -c -P 16`。待打标签后从 JitPack 验证。
+- [x] **4.4 首个编辑版本发布**（★★；依赖：2.6、4.1–4.3）。交付：按[发布清单](RELEASES.zh-CN.md)统一版本号、使用固定的 NDK、通过 `verifyNativeAlignment`、补齐 LICENSE 与第三方声明。验收：空白消费者工程从 JitPack 解析新版本，并在 ARM64 真机与 x86_64 模拟器上运行 trim/split。证据：`v1.1.0`（#24，GitHub Release v1.1.0）。发布准备——`versionName` 1.1.0（`versionCode` 5），README 加入编辑 API 与消费者要求（Kotlin 2.1+、compileSdk ≥ 26）；预编译 `.so` 未变，第三方声明无需更新。发布前用本地 Maven 产物验证：空白消费者工程（AGP 9.4.1、内置 Kotlin 2.2.10、compileSdk 36、R8 release）编译 README 与[本地接入](LOCAL_INTEGRATION.zh-CN.md)中的全部示例，release 包在 x86_64 模拟器（API 35）上裁剪、分割通过，APK 中 21 个 `.so` 通过 `zipalign -c -P 16`。发布后从 JitPack 解析 `com.github.zqcformix:FFmpegKitx:v1.1.0`（提交 `d167708`）：AAR 中 14 个 64 位 `.so` 的 LOAD 段对齐均 ≥ 16 KB，`libffmpegkit.so` 由 clang 19.0.1（r530567e，即 NDK r28.2）编译，POM 只依赖 `kotlin-stdlib` 2.2.20（compile）与 `kotlinx-coroutines-android` 1.11.0（runtime），`minCompileSdk` 为 26；空白消费者工程（AGP 9.4.1、内置 Kotlin 2.2.10、compileSdk 36、R8 release）编译 README 全部示例，APK 中 21 个 `.so` 通过 `zipalign -c -P 16`，release 包在 Xiaomi M2102K1AC（Android 14，arm64-v8a）与 x86_64 模拟器（API 35）上裁剪 [2 s, 8 s) 得到 [2 s, 8.133 s)、按 3 s 分割得到 4 段。JitPack 首次构建的临时失败与重建见[发布文档](RELEASES.zh-CN.md)第 6 节。
 
 ## 第二卷 · 可靠内核（M2）
 

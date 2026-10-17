@@ -6,7 +6,7 @@
 
 | 平台 | 当前状态 | 渠道与拟定坐标 |
 | --- | --- | --- |
-| Android | JitPack `com.github.zqcformix:FFmpegKitx:v1.1.0`（发布中，见第 6 节）：编辑 API（裁剪、分割、探测）与信息查询 API；上一版 `v1.0.3` 只含信息查询 API | 继续使用 JitPack。若迁移到 Maven Central，groupId 用 `io.github.zqcformix`（可通过 GitHub 账号验证命名空间），artifactId 拟为 `ffmpegkitx-android` |
+| Android | JitPack `com.github.zqcformix:FFmpegKitx:v1.1.0`（2026-10-18，见第 6 节）：编辑 API（裁剪、分割、探测）与信息查询 API；上一版 `v1.0.3` 只含信息查询 API | 继续使用 JitPack。若迁移到 Maven Central，groupId 用 `io.github.zqcformix`（可通过 GitHub 账号验证命名空间），artifactId 拟为 `ffmpegkitx-android` |
 | iOS / macOS（M4） | 未开始 | SwiftPM：本仓库的 `Package.swift` 加二进制 `FFmpegKitxCore.xcframework`，通过 Git URL + tag 引入 |
 | HarmonyOS（M4） | 未开始 | OHPM 包 `@ffmpegkitx/harmony` + HAR，发布到 <https://ohpm.openharmony.cn/>；scope 未注册 |
 | Linux / Windows（远期候选） | 未排期 | `ffmpegkitx-core` 原生归档 + CMake config，放在本仓库 GitHub Releases |
@@ -101,5 +101,6 @@ Google Play 自 2025-11-01 起要求面向 Android 15+ 的新应用和更新支�
 - **内容**：编辑 API——`FFmpeg.trim`（含 `TrimMode.EDIT_LIST`）、`FFmpeg.split`（`SplitRequest.byDuration`/`byRanges`）、`FFmpeg.probe`，`File`/`Uri` 扩展，`MediaInput`/`MediaOutput`，`FFmpegException`；行为与限制见 [Android 编辑 API 设计](ANDROID_API.zh-CN.md)。信息查询 API 不变。预编译 FFmpeg `.so` 与 v1.0.3 相同，第三方声明不变。
 - **兼容性**：本库以 Kotlin 2.2 元数据发布（`languageVersion`/`apiVersion` 2.2、`kotlin-stdlib` 2.2.20），消费者需要 Kotlin 2.1+；AAR 的 `minCompileSdk` 为 26；不再依赖 `androidx.core`。v1.0.3 以 Kotlin 2.4 元数据发布，AGP 9 默认工程（Kotlin 2.2）无法编译使用它的 Kotlin 代码。
 - **发布前验证**（2026-10-18，本地 Maven 产物 `com.github.zqcformix:ffmpegkit:1.1.0`）：空白消费者工程（AGP 9.4.1、内置 Kotlin 2.2.10、compileSdk 36、minSdk 26、R8 release）编译 README 与本地接入文档中的全部示例；release 包在 x86_64 模拟器（API 35）上裁剪 [2 s, 8 s) 得到 [2 s, 8.133 s)、按 3 s 分割出 4 段；APK 中 21 个 `.so` 通过 `zipalign -c -P 16`；库的全部仪器测试在模拟器与 Xiaomi M2102K1AC 上 90/90，host 测试 63/63，`verifyNativeAlignment` 通过（14 个 64 位 `.so`）。
-- **发布后验证**：待打标签后从 JitPack 解析 `v1.1.0` 补记。
+- **发布**：2026-10-18 在 `main` 的 `d167708` 上打 `v1.1.0` 标签，GitHub Release 同名。JitPack 第一次构建在读取 `settings.gradle.kts` 时解析不到 `org.gradle.toolchains.foojay-resolver-convention` 1.0.0 而失败（该版本在 Gradle 插件门户上可用，v1.0.3 用同一配置构建成功，判断为 JitPack 侧的临时网络问题）；仓库所有者登录 jitpack.io 删除失败记录后重新构建成功。JitPack 会缓存失败的构建，删除需要登录，接口删除返回 401。
+- **发布后验证**：从 JitPack 解析 `com.github.zqcformix:FFmpegKitx:v1.1.0`（提交 `d167708`）：AAR 中 14 个 64 位 `.so` 的 LOAD 段对齐均 ≥ 16 KB，`libffmpegkit.so` 由 clang 19.0.1（r530567e，即 NDK r28.2）编译，POM 只依赖 `kotlin-stdlib` 2.2.20（compile）与 `kotlinx-coroutines-android` 1.11.0（runtime），`minCompileSdk` 为 26；空白消费者工程（AGP 9.4.1、内置 Kotlin 2.2.10、compileSdk 36、R8 release）编译 README 全部示例，APK 中 21 个 `.so` 通过 `zipalign -c -P 16`，release 包在 Xiaomi M2102K1AC（Android 14，arm64-v8a）与 x86_64 模拟器（API 35）上裁剪 [2 s, 8 s) 得到 [2 s, 8.133 s)、按 3 s 分割得到 4 段。
 

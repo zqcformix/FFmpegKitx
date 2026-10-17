@@ -129,6 +129,6 @@ Only check a roadmap task after its code is merged to `main` with test evidence.
   - `release/<major.minor>` — optional, only when maintaining an older release line
   - No long-lived `develop` branch
 - **Commit convention**: `<type>(<scope>): summary`, scope optional — `feat`, `fix`, `docs`, `test`, `refactor`, `build`, `ci`, `chore`
-- **Release flow**: tag on `main` → JitPack auto-builds AAR → users update version
+- **Release flow**: tag on `main` → JitPack auto-builds AAR → verify from a blank Kotlin consumer → GitHub Release. JitPack caches a failed build; deleting it needs the owner signed in on jitpack.io (the API returns 401), then "Get it" rebuilds. Poll its status API at most once a minute (it rate-limits)
 - **Gitignored**: `*.jks`, `.claude/`
 - **Important**: every significant update must sync both `CLAUDE.md` and `README.md`. README is for library users only (usage, API, requirements, FFmpeg versions); never add roadmap, planning-doc links or other development plans to it
