@@ -1,7 +1,6 @@
 package io.github.nova.ffmpegkit
 
 import io.github.nova.ffmpegkit.FFmpegException.Reason
-import java.io.File
 
 /** Built by remux.cpp for trim and split; the constructor signature is part of the JNI contract. */
 internal class NativeRemuxStatus(
@@ -16,10 +15,10 @@ internal class NativeRemuxStatus(
         get() = code != 0 || reason != REASON_FROM_CODE
 
     /**
-     * The exception for a failed status. [output] names the output side in messages (the final
-     * target, not the temporary file the native code wrote).
+     * The exception for a failed status. [input] and [output] name the two sides in messages; the
+     * output is the final target, not the temporary file the native code wrote.
      */
-    fun toException(input: File, output: File): Exception {
+    fun toException(input: String, output: String): Exception {
         val role = if (outputSide) MediaRole.OUTPUT else MediaRole.INPUT
         val subject = if (outputSide) output else input
         val nativeCode = code.takeIf { it != 0 }

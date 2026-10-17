@@ -46,6 +46,7 @@ struct Track {
 
 struct Input {
     AVFormatContext* ctx = nullptr;
+    AVIOContext* io = nullptr;  // custom I/O when reading from a file descriptor
     std::vector<Track> tracks;
     bool has_video = false;
     int reference_stream = -1;  // the video stream, else the first copied audio stream
@@ -54,7 +55,13 @@ struct Input {
     Input() = default;
     Input(const Input&) = delete;
     Input& operator=(const Input&) = delete;
-    ~Input() { avformat_close_input(&ctx); }
+    ~Input();
+};
+
+// Where to read from: a path, or (fd >= 0) an open file descriptor that stays owned by the caller.
+struct Source {
+    std::string path;
+    int fd = -1;
 };
 
 struct Output {
@@ -68,7 +75,11 @@ struct Output {
 };
 
 // Opens the input and selects at most one video stream plus every audio stream (M1 limits).
-Status OpenInput(const std::string& path, Input* input);
+// A file descriptor must be seekable; it is read from offset 0 and never closed here.
+Status OpenInput(const Source& source, Input* input);
+
+// Reads the Source passed from Kotlin as (UTF-8 path bytes or null, fd or -1).
+Source ToSource(JNIEnv* env, jbyteArray path, jint fd);
 
 // Creates the output for the selected streams and writes its header.
 Status OpenOutput(const Input& input, const std::string& path, Output* output);

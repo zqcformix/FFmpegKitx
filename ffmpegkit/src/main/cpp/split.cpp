@@ -24,15 +24,15 @@ using remux::ToMicros;
 // are therefore never shorter than that, except the last.
 class Splitter {
 public:
-    Splitter(std::string input, std::string directory, std::string extension, int64_t segment_us, int max_segments)
-        : input_path_(std::move(input)),
+    Splitter(remux::Source input, std::string directory, std::string extension, int64_t segment_us, int max_segments)
+        : input_(std::move(input)),
           directory_(std::move(directory)),
           extension_(std::move(extension)),
           segment_us_(segment_us),
           max_segments_(max_segments) {}
 
     Status Run() {
-        Status s = remux::OpenInput(input_path_, &in_);
+        Status s = remux::OpenInput(input_, &in_);
         if (s.failed()) return s;
         if (in_.ctx->duration != AV_NOPTS_VALUE && in_.ctx->duration > 0 &&
             in_.ctx->duration / segment_us_ + 1 > max_segments_) {
@@ -115,7 +115,7 @@ private:
         return "more than " + std::to_string(max_segments_) + " segments of " + std::to_string(segment_us_) + " us";
     }
 
-    const std::string input_path_;
+    const remux::Source input_;
     const std::string directory_;
     const std::string extension_;
     const int64_t segment_us_;
@@ -131,19 +131,21 @@ private:
 
 }  // namespace
 
-// Writes segments 0001.<extension>, 0002.<extension>… into `directory`. Returns a NativeRemuxStatus
-// whose times are [start, end) pairs, one per segment.
+// Reads from `input_path` (UTF-8 bytes) or, when `input_fd` >= 0, from that descriptor, and writes
+// segments 0001.<extension>, 0002.<extension>… into `directory`. Returns a NativeRemuxStatus whose
+// times are [start, end) pairs, one per segment.
 extern "C" JNIEXPORT jobject JNICALL
 Java_io_github_nova_ffmpegkit_NativeSplit_split(
         JNIEnv* env,
         jobject /* this */,
-        jbyteArray input,
+        jbyteArray input_path,
+        jint input_fd,
         jbyteArray directory,
         jbyteArray extension,
         jlong segment_us,
         jint max_segments) {
-    Splitter splitter(ToUtf8Path(env, input), ToUtf8Path(env, directory), ToUtf8Path(env, extension), segment_us,
-                      max_segments);
+    Splitter splitter(remux::ToSource(env, input_path, input_fd), ToUtf8Path(env, directory), ToUtf8Path(env, extension),
+                      segment_us, max_segments);
     const Status status = splitter.Run();
     return remux::ToJava(env, status, status.failed() ? std::vector<int64_t>{} : splitter.Times());
 }

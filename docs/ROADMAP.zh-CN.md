@@ -15,9 +15,9 @@
 
 完成一项或改变计划时更新本节，新的会话从这里接手。
 
-- **当前阶段**：M1 进行中。已完成 1.1、4.1、4.3、2.1（快速裁剪）、2.5（`OutputDelivery` 临时文件与排他交付）和 2.2（关键帧对齐分割），均未发布。裁剪与分割目前只有内部的阻塞入口 `Trimmer.trim` / `Splitter.split`，只接受本地 `File`。
-- **最近完成**：2026-10-17 完成 2.2。原生层 `remux.cpp` 是裁剪与分割共用的打开输入、选流、建输出、重标时间戳的部分，JNI 结果统一为 `NativeRemuxStatus`。新的输出型操作都应走 `OutputDelivery`。2.6 的生成样本已就位（`scripts/generate-test-media.ps1`，音视频、纯视频、纯音频），`MediaInspector` 可全量解码，`MediaInspector.packets` 可逐包比对；长 GOP、非零起始时间、VFR 样本还没有。上一次发布是 2026-10-08 的 `v1.0.3`，记录见 [发布文档](RELEASES.zh-CN.md) 3.1。
-- **下一步**：3.1（`File`、`Uri` 与文件描述符输入）：通过 `ParcelFileDescriptor` 加自定义 `AVIOContext` 读取 SAF/MediaStore 内容，区分可 seek 与不可 seek 来源；`Uri` 输出不能使用同目录临时文件，要先定交付语义并写入 ANDROID_API 第 7 节。之后做 4.2（公开挂起入口）、2.3、3.2。
+- **当前阶段**：M1 进行中。已完成 1.1、4.1、4.3、2.1（快速裁剪）、2.5（`OutputDelivery` 临时文件与排他交付）和 2.2（关键帧对齐分割），均未发布。3.1 的实现已合入，但选择器与云盘的界面实测未做，尚未勾选。裁剪与分割只有内部的阻塞入口 `Trimmer.trim` / `Splitter.split`，接受 `MediaInput`（`File`、`Uri`、描述符）；裁剪输出可以是 `File` 或 `Uri`。
+- **最近完成**：2026-10-17 完成 3.1 的实现与自动化测试，`Uri` 输出改为"缓存临时文件 + 一次性复制"。同日全部 55 项仪器测试在 x86_64 模拟器（API 35）通过，这也是 2.1/2.2/2.5 的测试首次在 x86_64 上运行。ARM64 真机上 45 项（不含 `MediaUriTest`）此前已通过。小米真机每次安装测试 APK 都需要在手机上确认，无人值守时用模拟器（设 `ANDROID_SERIAL=emulator-5554`）。2.6 的生成样本已就位（音视频、纯视频、纯音频），长 GOP、非零起始时间、VFR 样本还没有。上一次发布是 2026-10-08 的 `v1.0.3`，记录见 [发布文档](RELEASES.zh-CN.md) 3.1。
+- **下一步**：4.2（公开挂起入口）：`FFmpeg.trim`/`FFmpeg.split` 与 `File`/`Uri` 扩展，自动切到 IO 调度器，协程取消通知原生任务；同时让 demo 应用提供系统文件选择器、照片选择器的裁剪入口，用来补齐 3.1 的界面实测。之后做 2.3、3.2。
 - **验证环境**：Xiaomi M2102K1AC（Android 14，API 34，arm64-v8a）真机；AVD `375x812_Unit_IN`。
 
 ## 当前基线
@@ -69,7 +69,7 @@
 
 ### 第 3 章　输入来源与媒体探测
 
-- [ ] **3.1 `File`、`Uri` 与文件描述符输入**（★★★；依赖：2.5）。交付：通过 `ParcelFileDescriptor` 加自定义 `AVIOContext` 读取 SAF/MediaStore 内容；区分可 seek 与不可 seek 来源；输出到 `Uri` 时要求以 `"rw"` 打开的可 seek 描述符（MP4 封装需要回写头部）。验收：系统文件选择器、照片选择器、MediaStore、云盘来源实测；不把 `content://` 当作文件路径；出错时无描述符泄漏。
+- [ ] **3.1 `File`、`Uri` 与文件描述符输入**（★★★；依赖：2.5）。交付：通过 `ParcelFileDescriptor` 加自定义 `AVIOContext` 读取 SAF/MediaStore 内容；区分可 seek 与不可 seek 来源；输出到 `Uri` 时先写缓存临时文件再一次性复制（原定的 `"rw"` 可 seek 描述符方案改为此方案，不再要求输出可 seek，失败时 `Uri` 不被改动；语义见 ANDROID_API 第 7 节）。验收：系统文件选择器、照片选择器、MediaStore、云盘来源实测；不把 `content://` 当作文件路径；出错时无描述符泄漏。**进度**：实现已合入（内部 `MediaInput`/`MediaOutput`/`UriDelivery`，原生 `remux.cpp` 的描述符读取）。仪器测试 `MediaUriTest` 10 项 2026-10-17 在 x86_64 模拟器（API 35）通过：MediaStore 输入的裁剪与分割与文件输入逐包相同、输出到 MediaStore（按 MIME 推断容器）、失败时输出 `Uri` 原内容不变、`file://`、调用方描述符（已读过一部分仍从头读、调用后仍有效）、管道报 `UNSUPPORTED_MEDIA`、不存在的条目报 `INPUT_NOT_FOUND`、10 轮成功与失败后描述符数不增长、无临时文件残留。**未完成**：系统文件选择器、照片选择器、云盘来源需要界面操作，待 4.2 公开入口与 demo 应用就绪后实测；ARM64 真机上的 `MediaUriTest` 待补跑。
 - [ ] **3.2 结构化 `probe`**（★★；依赖：3.1）。交付：格式、时长、流、编码、尺寸、帧率、旋转、声道；缺失值保留为未知。验收：与固定版本 FFprobe 交叉核对；未知时长不伪造为零。字幕、metadata 等完整字段随 9.2 扩充。
 
 ### 第 4 章　Kotlin API、错误模型与首个发布
