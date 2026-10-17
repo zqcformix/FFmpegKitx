@@ -35,6 +35,15 @@ object FFmpeg {
         )
     }
 
+    /**
+     * Reads the container and stream headers of [input] without decoding; see [MediaInfo]. Unlike trim
+     * and split, any number and kind of streams is accepted.
+     */
+    suspend fun probe(input: MediaInput): MediaInfo = runNative { cancellation ->
+        workerThreadObserver?.invoke(Thread.currentThread())
+        Prober.probe(input, cancellation)
+    }
+
     /** Test hook: sees the thread each operation's work runs on. */
     @Volatile
     internal var workerThreadObserver: ((Thread) -> Unit)? = null
@@ -133,3 +142,9 @@ suspend fun Uri.splitTo(
 ): SplitResult = FFmpeg.split(
     SplitRequest.byDuration(MediaInput.of(resolver, this), outputDirectory, segmentDuration, fileNamePrefix, containerExtension),
 )
+
+/** Probes this file; see [FFmpeg.probe]. */
+suspend fun File.probe(): MediaInfo = FFmpeg.probe(MediaInput.of(this))
+
+/** Probes the content behind this Uri; see [FFmpeg.probe]. */
+suspend fun Uri.probe(resolver: ContentResolver): MediaInfo = FFmpeg.probe(MediaInput.of(resolver, this))

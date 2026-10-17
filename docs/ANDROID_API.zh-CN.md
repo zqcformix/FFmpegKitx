@@ -1,6 +1,6 @@
 # Android 编辑 API 设计（M1 草案）
 
-> **状态：大部分已在 `main` 实现，尚未发布。** 已实现：`FFmpeg.trim`/`FFmpeg.split`、`TrimRequest`、`SplitRequest.byDuration`、`MediaInput`/`MediaOutput`、`File`/`Uri` 的 `trimTo`/`splitTo` 扩展、`TimeRange`、`FFmpegException`，以及第 3、4、7 节的行为和协程取消。**未实现**：第 5 节的进度回调与 `MediaProgress`（路线图 5.2），因此第 5 节示例无法编译；交付复制阶段的取消（5.3）；`SplitRequest.byRanges`（2.3）；edit list 模式（2.4）。已发布的 `v1.0.3` 只包含 `FFmpegKit` 信息查询接口。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
+> **状态：大部分已在 `main` 实现，尚未发布。** 已实现：`FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`、`TrimRequest`、`SplitRequest.byDuration`、`MediaInput`/`MediaOutput`、`File`/`Uri` 的 `trimTo`/`splitTo`/`probe` 扩展、`MediaInfo`/`StreamInfo`、`TimeRange`、`FFmpegException`，以及第 3、4、7、8 节的行为和协程取消。**未实现**：第 5 节的进度回调与 `MediaProgress`（路线图 5.2），因此第 5 节示例无法编译；交付复制阶段的取消（5.3）；`SplitRequest.byRanges`（2.3）；edit list 模式（2.4）。已发布的 `v1.0.3` 只包含 `FFmpegKit` 信息查询接口。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
 
 本文是 M1 范围、行为与限制的唯一出处；其他文档只引用，不复述。
 
@@ -160,3 +160,30 @@ try {
 - **输出交付**：先写同目录的隐藏临时文件（`.名称.随机串.part.扩展名`，保留扩展名以选择容器），trailer 写入和关闭成功后才交付。交付不覆盖任何已有文件，依次尝试：`renameat2(RENAME_NOREPLACE)` 原子发布（libc 自 Android 11 提供）；硬链接（Android 的 SELinux 拒绝应用对自身文件建硬链接，主要用于其他平台）；最后用 `CREATE_NEW` 排他创建后复制。复制期间路径可能已出现但内容不完整，调用方必须等函数返回再读取。复制失败时只删除本次创建且身份（设备号与 inode）仍匹配的文件；无法确认时保留，并以 suppressed 异常说明。
 - **并发**：多个任务可以处理不同文件。不要在执行期间替换输入、输出或父目录。同一输出路径的竞争会失败，而不是覆盖。回滚只处理本次创建且身份仍匹配的文件，不是跨进程事务。
 - **不在 M1**：多轨选择、字幕与 metadata 保留、网络输入、精确裁剪、画面 crop、Java 入口，见路线图。
+
+## 8. 媒体探测
+
+```kotlin
+suspend fun describe(context: Context, uri: Uri) {
+    val info = uri.probe(context.contentResolver) // 或 FFmpeg.probe(MediaInput.of(...))、file.probe()
+    println(info.duration)                        // null 表示时长未知
+    info.streams.forEach { stream ->
+        when (stream) {
+            is StreamInfo.Video -> println("${stream.width}x${stream.height} 旋转 ${stream.rotation}°")
+            is StreamInfo.Audio -> println("${stream.sampleRate} Hz ${stream.channelLayout}")
+            is StreamInfo.Other -> println(stream.mediaType)
+        }
+    }
+}
+```
+
+- 只读容器与流头（`avformat_find_stream_info`），不解码，不写任何文件。输入、错误与取消同其他操作：输入要求见第 7 节，失败抛 `FFmpegException`（输入缺失 `INPUT_NOT_FOUND`、不是可识别的媒体 `INVALID_MEDIA` 等），取消以原样的 `CancellationException` 结束。
+- 报告文件中的**全部**流（包括封面、字幕、数据流和多个视频流），不套用第 7 节对 trim/split 的轨道限制，调用方可据此先判断能否裁剪。
+- `MediaInfo`：`formatName`（与 ffprobe 的 `format_name` 相同，如 `mov,mp4,m4a,3gp,3g2,mj2`）、`startTime`（trim/split 的时间以它为零点）、`duration`、`bitRate`（bit/s）、`streams`（按容器顺序）。
+- 每条流有 `index`、`codecName`（同 ffprobe 的 `codec_name`）、`duration`、`bitRate`，并按类型细分：
+  - `StreamInfo.Video`：编码尺寸 `width`/`height`（未应用旋转）、`frameRate`（平均帧率，同 ffprobe 的 `avg_frame_rate`）、`rotation`、`isAttachedPicture`（封面）。
+  - `StreamInfo.Audio`：`sampleRate`、`channels`、`channelLayout`（如 `stereo`、`5.1`）。
+  - `StreamInfo.Other`：`mediaType` 为 `subtitle`、`data`、`attachment` 或 `unknown`；字幕语言、metadata 等随路线图 9.2 补充。
+- **缺失值为 `null`，不伪造为零**。数值与同版本 ffprobe 一致，但有一处刻意不同：FFmpeg 只能按码率估算的时长（ADTS AAC 等裸流，ffprobe 会提示 "Estimating duration from bitrate"）报为 `null`，因为估算值可能偏差明显（测试样本实际 10 s，估算为 10.1 s）。裸 H.264 等没有时间信息的流，`startTime`、`duration`、`bitRate` 均为 `null`；其 `frameRate` 可能是解封装器的默认值（H.264 裸流为 25），与 ffprobe 相同。
+- `rotation` 是显示时需要**顺时针**旋转的角度，取值 `0 until 360`，与 Android `MediaFormat.KEY_ROTATION`、`MediaMetadataRetriever` 的旋转值一致；ffprobe 的 `rotation` 是逆时针角度，符号相反（ffprobe 的 `-90` 对应这里的 `90`）。没有显示矩阵时为 0，矩阵不是纯旋转时为 `null`。
+- 探测只读取文件开头（FFmpeg 默认最多约 5 MB、5 s 的数据）以及容器索引，通常很快；对时长未知的输入，trim/split 照常执行。

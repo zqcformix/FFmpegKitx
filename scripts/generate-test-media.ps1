@@ -6,6 +6,9 @@
 # Tests assert on their structure, so keep these properties when changing the commands:
 #   - 10 s long, video 320x240 at 30 fps, H.264 with B-frames and a keyframe exactly every 1 s
 #   - audio AAC-LC 44.1 kHz stereo
+# Probe samples are remuxed from those without re-encoding:
+#   - video_h264_rotated.mp4: display matrix rotation -90 (ffprobe), i.e. shown rotated 90 degrees clockwise
+#   - video_h264.h264 (Annex B) and audio_aac.aac (ADTS): raw streams whose duration the container does not state
 param(
     [string]$FFmpeg = "ffmpeg"
 )
@@ -37,5 +40,10 @@ function Invoke-FFmpeg([string[]]$arguments) {
 Invoke-FFmpeg ($global + $video + $audio + $h264 + $aac + $output + @("-shortest", (Join-Path $out "av_h264_aac.mp4")))
 Invoke-FFmpeg ($global + $video + $h264 + $output + @((Join-Path $out "video_h264.mp4")))
 Invoke-FFmpeg ($global + $audio + $aac + $output + @((Join-Path $out "audio_aac.m4a")))
+
+$videoMp4 = Join-Path $out "video_h264.mp4"
+Invoke-FFmpeg ($global + @("-display_rotation:v:0", "-90", "-i", $videoMp4, "-c", "copy") + $output + @((Join-Path $out "video_h264_rotated.mp4")))
+Invoke-FFmpeg ($global + @("-i", $videoMp4, "-c", "copy", "-bsf:v", "h264_mp4toannexb", "-f", "h264", (Join-Path $out "video_h264.h264")))
+Invoke-FFmpeg ($global + @("-i", (Join-Path $out "audio_aac.m4a"), "-c", "copy", "-f", "adts", (Join-Path $out "audio_aac.aac")))
 
 Get-ChildItem $out | Select-Object Name, Length

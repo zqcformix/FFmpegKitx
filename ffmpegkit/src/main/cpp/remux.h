@@ -1,4 +1,4 @@
-// Shared stream-copy plumbing for trim.cpp and split.cpp.
+// Shared stream-copy plumbing for trim.cpp and split.cpp; probe.cpp uses the input side.
 #pragma once
 
 #include <jni.h>
@@ -85,8 +85,11 @@ struct Output {
     void Reset();
 };
 
-// Opens the input and selects at most one video stream plus every audio stream (M1 limits).
+// Opens the input and reads its stream info without selecting streams (probe.cpp).
 // A file descriptor must be seekable; it is read from offset 0 and never closed here.
+Status OpenFormat(const Source& source, const Cancellation* cancellation, Input* input);
+
+// OpenFormat, then selects at most one video stream plus every audio stream (M1 limits).
 Status OpenInput(const Source& source, const Cancellation* cancellation, Input* input);
 
 // Reads the Source passed from Kotlin as (UTF-8 path bytes or null, fd or -1).
