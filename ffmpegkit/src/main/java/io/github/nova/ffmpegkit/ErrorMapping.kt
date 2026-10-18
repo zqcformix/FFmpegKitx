@@ -31,6 +31,9 @@ internal object AvError {
     const val ENOSYS = -38
     const val EDQUOT = -122
 
+    /** A descriptor read stalled for longer than [FFmpeg.readTimeout]. */
+    const val ETIMEDOUT = -110
+
     val INVALIDDATA = tag('I', 'N', 'D', 'A')
     val EOF = tag('E', 'O', 'F', ' ')
     val PATCHWELCOME = tag('P', 'A', 'W', 'E')
@@ -45,7 +48,7 @@ internal object AvError {
 
     /** Every value above, in the order `NativeErrors.constants()` returns them. */
     val all: List<Int> = listOf(
-        EPERM, ENOENT, EIO, EACCES, EEXIST, EINVAL, ENOSPC, EROFS, ENOSYS, EDQUOT,
+        EPERM, ENOENT, EIO, EACCES, EEXIST, EINVAL, ENOSPC, EROFS, ENOSYS, EDQUOT, ETIMEDOUT,
         INVALIDDATA, EOF, PATCHWELCOME,
         DEMUXER_NOT_FOUND, MUXER_NOT_FOUND, DECODER_NOT_FOUND, ENCODER_NOT_FOUND,
         STREAM_NOT_FOUND, PROTOCOL_NOT_FOUND, BSF_NOT_FOUND, FILTER_NOT_FOUND,
@@ -66,7 +69,7 @@ internal object AvError {
         EACCES, EPERM, EROFS -> Reason.ACCESS_DENIED
         EEXIST -> Reason.OUTPUT_EXISTS
         ENOSPC, EDQUOT -> Reason.INSUFFICIENT_SPACE
-        EIO -> Reason.IO
+        EIO, ETIMEDOUT -> Reason.IO
         // EOF only reaches here when the media ended before the data a caller needed.
         INVALIDDATA, EOF -> Reason.INVALID_MEDIA
         in unsupported -> Reason.UNSUPPORTED_MEDIA

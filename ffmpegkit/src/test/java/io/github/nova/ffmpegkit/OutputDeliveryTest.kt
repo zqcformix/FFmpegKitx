@@ -165,6 +165,40 @@ class OutputDeliveryTest {
     }
 
     @Test
+    fun cancellingACopyRemovesTheOutputItCreated() {
+        assertThrows(CancellationException::class.java) {
+            OutputDelivery.deliver(
+                null, target,
+                meter = DeliveryMeter { true },
+                publish = { _, _ -> throw UnsupportedOperationException() },
+                identity = { it.fileName.toString() },
+            ) { it.writeBytes(CONTENT) }
+        }
+        assertOnlyFiles()
+    }
+
+    @Test
+    fun deliveryCountsBytesAndCarriesTheIdentity() {
+        val meter = DeliveryMeter()
+        val delivered = OutputDelivery.deliver(null, target, meter, identity = { it.fileName.toString() }) { it.writeBytes(CONTENT) }
+        assertEquals(CONTENT.size.toLong(), meter.expectedBytes)
+        assertEquals(CONTENT.size.toLong(), meter.deliveredBytes)
+        assertEquals("clip.mp4", delivered.identity)
+    }
+
+    @Test
+    fun aRolledBackOutputIsRemovedOnlyWhileUnchanged() {
+        target.writeBytes(CONTENT)
+        val failure = CancellationException("cancelled")
+        OutputDelivery.removePublished(target, "published", failure, identityOf = { "replaced" })
+        assertTrue(target.exists())
+        assertEquals(1, failure.suppressed.size)
+        OutputDelivery.removePublished(target, "published", failure, identityOf = { "published" })
+        assertFalse(target.exists())
+        assertEquals(1, failure.suppressed.size)
+    }
+
+    @Test
     fun failedCopyRemovesTheOutputItCreated() {
         val e = assertThrows(FFmpegException::class.java) {
             OutputDelivery.deliver(

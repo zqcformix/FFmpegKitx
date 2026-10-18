@@ -34,7 +34,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
     inspect.cpp
     probe.cpp
     files.cpp
-    log.cpp)
+    log.cpp
+    fd_reader.cpp)
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${FFMPEG_INCLUDE_DIR})
