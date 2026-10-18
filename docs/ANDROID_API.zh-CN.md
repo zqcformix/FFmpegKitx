@@ -1,6 +1,6 @@
 # Android 编辑 API 设计（M1 草案）
 
-> **状态：已随 `v1.1.0` 发布（2026-10-18）。** 已实现：`FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`、`TrimRequest`（含 `TrimMode`）、`SplitRequest.byDuration`/`byRanges`、`MediaInput`/`MediaOutput`、`File`/`Uri` 的 `trimTo`/`splitTo`/`probe` 扩展、`MediaInfo`/`StreamInfo`、`TimeRange`、`FFmpegException`，以及第 3、4、7、8 节的行为和协程取消。**未实现**：第 5 节的进度回调与 `MediaProgress`（路线图 5.2），因此第 5 节示例无法编译；交付复制阶段的取消（5.3）。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
+> **状态：已随 `v1.1.0` 发布（2026-10-18）。** 已实现：`FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`、`TrimRequest`（含 `TrimMode`）、`SplitRequest.byDuration`/`byRanges`、`MediaInput`/`MediaOutput`、`File`/`Uri` 的 `trimTo`/`splitTo`/`probe` 扩展、`MediaInfo`/`StreamInfo`、`TimeRange`、`FFmpegException`，以及第 3、4、7、8 节的行为和协程取消。**v1.1.0 之后（未发布）**：第 5 节的进度回调 `onProgress`/`MediaProgress`（路线图 5.2 的进度部分）与内部会话状态机（5.1）。**未实现**：任务日志（5.2 的日志部分）、交付复制阶段的取消（5.3）。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
 
 本文是 M1 范围、行为与限制的唯一出处；其他文档只引用，不复述。
 
@@ -113,12 +113,26 @@ fun startTrim(
 // 调用方保存返回的 Job，需要取消时调用 job.cancel()。
 ```
 
-- `scope` 应来自调用方的生命周期，例如 `viewModelScope`。回调在 IO 工作线程执行：更新 `StateFlow` 是安全的，但不能直接操作 View。
-- `MediaProgress` 包含 `fraction`（0–1，单调不减；总时长未知时为 `null`）和从 1 开始的 `segmentIndex`。关键帧对齐分割的总段数要读完才能确定，因此不提供总段数。
-- `1.0` 留给输出交付阶段。成功与否以挂起函数正常返回或抛出异常为准，不以进度为准。
+- `FFmpeg.trim`/`FFmpeg.split` 有带 `onProgress: ((MediaProgress) -> Unit)?` 的重载，`trimTo`/`splitTo` 扩展的最后一个参数也是它（可写成尾随 lambda）；probe 不报告进度。v1.1.0 的签名保留，已编译的调用方不受影响。
+- `scope` 应来自调用方的生命周期，例如 `viewModelScope`。回调在 IO 工作线程执行，不会与自身并发，函数返回或抛出后不再调用：更新 `StateFlow` 是安全的，但不能直接操作 View。
+- 写出开始后（输入已打开、容器头已写入）每 100 ms 读取一次原生计数，有变化才回调；输出交付后再回调一次。很短的任务可能只收到最后这一次。
+- `MediaProgress` 的时间都在**目标时间轴**上：trim 从请求起点算起，按时长分割从输入起点算起，按范围分割为各范围首尾相接之和。
+  - `processed`：已写出的媒体时长，单调不减，已知 `total` 时不超过它。trim 的起点回退到关键帧时，起点之前的部分不计入。
+  - `total`：请求的范围按输入时长夹取后的总长；输入时长未知、且某个范围（或按时长分割的整个输入）通向结尾时为 `null`。只能按码率估算的时长（ADTS 等）与第 8 节一样视为未知。
+  - `fraction`：0–1，单调不减，`total` 未知时为 `null`，即不定进度。它覆盖写出与交付两段：已知交付要复制（`Uri` 输出；Android 11 以下的文件输出，见第 7 节"输出交付"）时写出占 0–0.5、复制占 0.5–0.99；否则交付是一次重命名，写出占 0–0.99。全部交付后为 `1.0`。实际交付方式与预期不同时（例如 Android 11+ 的文件系统不支持 `renameat2`），复制期间停在 0.99。
+  - `bytesWritten`：写入各输出的字节数，含容器头与尾，不含交付复制。
+  - `segmentIndex`：从 1 开始的当前段号，trim 恒为 1。关键帧对齐分割的总段数要读完才能确定，因此不提供总段数。
+  - `speed`：`processed` 与开始执行以来耗时之比（如 `12.0` 表示每秒写出 12 s 媒体），无法测量时为 `null`。
+- 成功与否以挂起函数正常返回或抛出异常为准，不以进度为准：取消或失败时最后一次进度不是 `1.0`。
+- 进度回调抛出的异常会终止任务并原样传播：原生工作停止、临时文件删除，不发布任何输出。交付完成后的那次回调抛出时，输出已经发布并保留。
 - 取消覆盖原生探测、包读写检查点和交付复制。中断依赖底层 I/O 检查点，不保证任意阻塞系统调用立即结束。
   - 当前实现：取消标志挂在 FFmpeg 的 `interrupt_callback` 上，并在每个包的读写之间检查；被取消的任务删除临时文件、关闭描述符后，挂起函数才以原样的 `CancellationException` 结束，不会发布任何输出。交付开始（重命名、链接或复制）之后的取消不再中断，已完成的交付保留；复制阶段的取消随路线图 5.3 实现。
-- 进度回调抛出的异常会终止任务并原样传播。
+- **会话**（路线图 5.1，内部实现，暂不公开）：每次调用对应一个进程内唯一 ID 的会话，状态为排队 → 执行 → 成功 | 失败 | 取消，终态只设置一次，并且在原生资源与临时文件释放之后才设置。终态就是调用的结束方式：正常返回为成功，抛出 `CancellationException` 为取消，抛出其他异常为失败。优先级规则如下：
+  - 取消请求在工作结束前到达时，即使中断导致了原生错误，也以取消结束，不报 `FFmpegException`。
+  - 失败在取消请求之前已经结束工作时，以失败结束。
+  - 进度回调抛出的异常优先于它引发的中断，原样抛出。
+  - 排队中（尚未开始执行）被取消的调用不会运行。
+  - 公开的会话对象（`Flow`/`StateFlow`）见路线图 12.1。
 
 ## 6. 错误模型
 

@@ -24,16 +24,17 @@ using remux::ToMicros;
 class Trimmer {
 public:
     Trimmer(remux::Source input, std::string output, int64_t start_us, int64_t end_us, bool edit_list,
-            const remux::Cancellation* cancellation)
+            remux::Task* task)
         : input_(std::move(input)),
           output_path_(std::move(output)),
           start_us_(start_us),
           end_us_(end_us),
           edit_list_(edit_list),
-          cancellation_(cancellation) {}
+          task_(task),
+          progress_(task) {}
 
     Status Run() {
-        Status s = remux::OpenInput(input_, cancellation_, &in_);
+        Status s = remux::OpenInput(input_, task_, &in_);
         if (s.failed()) return s;
         if (in_.ctx->duration != AV_NOPTS_VALUE && in_.ctx->duration > 0 && start_us_ >= in_.ctx->duration) {
             return Rejected(remux::kReasonRangeOutsideMedia, false, "start is at or beyond the end of the media");
@@ -44,7 +45,7 @@ public:
         if (edit_list_ && !IsMovFamily(output_path_)) {
             return Rejected(remux::kReasonUnsupportedMedia, true, "edit list mode needs an MP4 or MOV output");
         }
-        s = remux::OpenOutput(in_, output_path_, cancellation_, &out_);
+        s = remux::OpenOutput(in_, output_path_, task_, &out_);
         if (s.failed()) return s;
         if (start_us_ > 0) {
             // With an index (MP4, Matroska) this lands on the last keyframe at or before the start.
@@ -69,7 +70,7 @@ private:
         Packet packet(av_packet_alloc());
         if (!packet) return Failure(AVERROR(ENOMEM), false, "allocate packet");
         while (!AllFinished()) {
-            if (cancellation_->IsCancelled()) return remux::Cancelled();
+            if (task_->IsCancelled()) return remux::Cancelled();
             int ret = av_read_frame(in_.ctx, packet.get());
             if (ret == AVERROR_EOF) {
                 // A seek can also land after the last keyframe (or audio packet) the start needs.
@@ -186,7 +187,7 @@ private:
         // A byte seek reaches the start of index-less inputs; formats that refuse it seek by time.
         int ret = av_seek_frame(in_.ctx, -1, 0, AVSEEK_FLAG_BYTE);
         if (ret < 0) ret = avformat_seek_file(in_.ctx, -1, INT64_MIN, INT64_MIN, in_.origin, 0);
-        if (ret == AVERROR_EXIT || cancellation_->IsCancelled()) return remux::Cancelled();
+        if (ret == AVERROR_EXIT || task_->IsCancelled()) return remux::Cancelled();
         return ret < 0 ? Failure(ret, false, "seek back to the start of the input") : Status{};
     }
 
@@ -238,7 +239,9 @@ private:
         }
         ++track.written;
         // Every stream moves by the same amount, so audio and video keep their relative timing.
-        return remux::WritePacket(in_, &out_, packet, shift_pts_, shift_time_base_);
+        const int ret = remux::WritePacket(in_, &out_, packet, shift_pts_, shift_time_base_);
+        if (ret >= 0 && last_end_abs_ > start_abs_) progress_.Report(std::min(last_end_abs_, end_abs_) - start_abs_);
+        return ret;
     }
 
     // What becomes time 0 in the output: the anchor keyframe, or in edit list mode the requested start.
@@ -290,7 +293,8 @@ private:
     const int64_t start_us_;
     const int64_t end_us_;
     const bool edit_list_;
-    const remux::Cancellation* const cancellation_;
+    remux::Task* const task_;
+    remux::Progress progress_;  // target timeline: from the requested start, at most to the requested end
 
     remux::Input in_;
     remux::Output out_;
@@ -317,7 +321,7 @@ private:
 }  // namespace
 
 // Reads from `input_path` (UTF-8 bytes) or, when `input_fd` >= 0, from that descriptor; stops with
-// AVERROR_EXIT when `cancellation` (a NativeCancellation handle, or 0) is cancelled.
+// AVERROR_EXIT when `task` (a NativeTask handle, or 0) is cancelled, and reports progress to it.
 // Returns a NativeRemuxStatus whose times are [actual start, actual end) in microseconds.
 extern "C" JNIEXPORT jobject JNICALL
 Java_io_github_nova_ffmpegkit_NativeTrim_trim(
@@ -329,9 +333,10 @@ Java_io_github_nova_ffmpegkit_NativeTrim_trim(
         jlong start_us,
         jlong end_us,
         jboolean edit_list,
-        jlong cancellation) {
+        jlong task) {
+    remux::Task scratch;
     Trimmer trimmer(remux::ToSource(env, input_path, input_fd), ToUtf8Path(env, output), start_us, end_us,
-                    edit_list == JNI_TRUE, remux::FromHandle(cancellation));
+                    edit_list == JNI_TRUE, remux::FromHandle(task, &scratch));
     const Status status = trimmer.Run();
     std::vector<int64_t> times;
     if (!status.failed()) times = {trimmer.actual_start_us(), trimmer.actual_end_us()};

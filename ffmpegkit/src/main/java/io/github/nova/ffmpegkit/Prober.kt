@@ -5,9 +5,9 @@ import kotlin.time.Duration.Companion.microseconds
 /** Structured probe over probe.cpp; blocking. [FFmpeg.probe] is the public suspend entry point. */
 internal object Prober {
 
-    fun probe(input: MediaInput, cancellation: NativeCancellation? = null): MediaInfo = input.open().use { opened ->
-        val result = NativeProbe.probe(opened.path?.toByteArray(), opened.fd, cancellation?.nativeHandle ?: 0L)
-        cancellation?.throwIfCancelled()
+    fun probe(input: MediaInput, task: Task? = null): MediaInfo = input.open().use { opened ->
+        val result = NativeProbe.probe(opened.path?.toByteArray(), opened.fd, task?.nativeHandle ?: 0L)
+        task?.throwIfCancelled()
         if (result.status.failed) throw result.status.toException(input.description, input.description)
         result.toMediaInfo()
     }
@@ -86,7 +86,7 @@ internal object NativeProbe {
         System.loadLibrary("ffmpegkit")
     }
 
-    /** Reads [inputPath] (UTF-8 bytes) or, when [inputFd] >= 0, that descriptor; [cancellation] is a handle or 0. */
+    /** Reads [inputPath] (UTF-8 bytes) or, when [inputFd] >= 0, that descriptor; [task] is a [NativeTask] handle or 0. */
     @JvmStatic
-    external fun probe(inputPath: ByteArray?, inputFd: Int, cancellation: Long): NativeProbeResult
+    external fun probe(inputPath: ByteArray?, inputFd: Int, task: Long): NativeProbeResult
 }

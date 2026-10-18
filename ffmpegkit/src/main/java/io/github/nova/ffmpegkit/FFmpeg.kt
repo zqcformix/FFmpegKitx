@@ -12,38 +12,57 @@ import kotlin.time.Duration
  * published. Failures throw [FFmpegException]; invalid arguments throw [IllegalArgumentException]
  * before any work starts.
  *
+ * Trim and split take an optional `onProgress` callback; see [MediaProgress]. It runs on an IO
+ * worker thread, never concurrently with itself and never after the call returned, so it may update
+ * a `StateFlow` but not views. An exception it throws stops the work and is rethrown by the call.
+ *
  * The native library is loaded on first use.
  */
 object FFmpeg {
 
     /** Fast (stream copy) trim; see [TrimResult] for how the actual range relates to the request. */
-    suspend fun trim(request: TrimRequest): TrimResult = runNative { cancellation ->
+    suspend fun trim(request: TrimRequest): TrimResult = trim(request, null)
+
+    /** [trim] reporting progress to [onProgress]; see [MediaProgress]. */
+    suspend fun trim(request: TrimRequest, onProgress: ((MediaProgress) -> Unit)?): TrimResult = runNative(
+        "trim",
+        onProgress?.let {
+            val copies = request.output is MediaOutput.ToUri || OutputDelivery.expectsCopy
+            ProgressReporter(ProgressTimeline.ranges(listOf(request.range)), copies, it)
+        },
+    ) { task ->
         workerThreadObserver?.invoke(Thread.currentThread())
-        Trimmer.trim(request.input, request.output, request.range, cancellation, request.mode)
+        Trimmer.trim(request.input, request.output, request.range, task, request.mode)
     }
 
     /** Splits the input into segments; see [SplitRequest.byDuration] and [SplitRequest.byRanges]. */
-    suspend fun split(request: SplitRequest): SplitResult = runNative { cancellation ->
-        workerThreadObserver?.invoke(Thread.currentThread())
+    suspend fun split(request: SplitRequest): SplitResult = split(request, null)
+
+    /** [split] reporting progress to [onProgress]; see [MediaProgress]. */
+    suspend fun split(request: SplitRequest, onProgress: ((MediaProgress) -> Unit)?): SplitResult {
         val ranges = request.ranges
-        if (ranges != null) {
-            Splitter.splitByRanges(
-                request.input,
-                request.outputDirectory,
-                ranges,
-                request.fileNamePrefix,
-                request.containerExtension,
-                cancellation,
-            )
-        } else {
-            Splitter.split(
-                request.input,
-                request.outputDirectory,
-                request.segmentDuration!!,
-                request.fileNamePrefix,
-                request.containerExtension,
-                cancellation,
-            )
+        val timeline = if (ranges != null) ProgressTimeline.ranges(ranges) else ProgressTimeline.WHOLE_INPUT
+        return runNative("split", onProgress?.let { ProgressReporter(timeline, OutputDelivery.expectsCopy, it) }) { task ->
+            workerThreadObserver?.invoke(Thread.currentThread())
+            if (ranges != null) {
+                Splitter.splitByRanges(
+                    request.input,
+                    request.outputDirectory,
+                    ranges,
+                    request.fileNamePrefix,
+                    request.containerExtension,
+                    task,
+                )
+            } else {
+                Splitter.split(
+                    request.input,
+                    request.outputDirectory,
+                    request.segmentDuration!!,
+                    request.fileNamePrefix,
+                    request.containerExtension,
+                    task,
+                )
+            }
         }
     }
 
@@ -51,14 +70,18 @@ object FFmpeg {
      * Reads the container and stream headers of [input] without decoding; see [MediaInfo]. Unlike trim
      * and split, any number and kind of streams is accepted.
      */
-    suspend fun probe(input: MediaInput): MediaInfo = runNative { cancellation ->
+    suspend fun probe(input: MediaInput): MediaInfo = runNative("probe") { task ->
         workerThreadObserver?.invoke(Thread.currentThread())
-        Prober.probe(input, cancellation)
+        Prober.probe(input, task)
     }
 
     /** Test hook: sees the thread each operation's work runs on. */
     @Volatile
     internal var workerThreadObserver: ((Thread) -> Unit)? = null
+
+    /** Test hook: sees every session state change, on the thread that made it. */
+    @Volatile
+    internal var sessionListener: ((Session, Session.State) -> Unit)? = null
 }
 
 /**
@@ -196,22 +219,30 @@ class SplitSegment internal constructor(val file: File, val actualRange: TimeRan
         if (requestedRange == null) "SplitSegment($file, $actualRange)" else "SplitSegment($file, requested=$requestedRange, actual=$actualRange)"
 }
 
-/** Trims this file to [start, endExclusive) (to the end of the media if [endExclusive] is null) into [output]. */
+/**
+ * Trims this file to [start, endExclusive) (to the end of the media if [endExclusive] is null) into
+ * [output], reporting to [onProgress] if given; see [FFmpeg.trim].
+ */
 suspend fun File.trimTo(
     output: File,
     start: Duration,
     endExclusive: Duration? = null,
     mode: TrimMode = TrimMode.KEYFRAME,
-): TrimResult = FFmpeg.trim(TrimRequest(MediaInput.of(this), MediaOutput.of(output), TimeRange(start, endExclusive), mode))
+    onProgress: ((MediaProgress) -> Unit)? = null,
+): TrimResult = FFmpeg.trim(TrimRequest(MediaInput.of(this), MediaOutput.of(output), TimeRange(start, endExclusive), mode), onProgress)
 
-/** Trims the content behind this Uri to [start, endExclusive) into [output]. */
+/** Trims the content behind this Uri to [start, endExclusive) into [output]; see [File.trimTo]. */
 suspend fun Uri.trimTo(
     resolver: ContentResolver,
     output: File,
     start: Duration,
     endExclusive: Duration? = null,
     mode: TrimMode = TrimMode.KEYFRAME,
-): TrimResult = FFmpeg.trim(TrimRequest(MediaInput.of(resolver, this), MediaOutput.of(output), TimeRange(start, endExclusive), mode))
+    onProgress: ((MediaProgress) -> Unit)? = null,
+): TrimResult = FFmpeg.trim(
+    TrimRequest(MediaInput.of(resolver, this), MediaOutput.of(output), TimeRange(start, endExclusive), mode),
+    onProgress,
+)
 
 /** Splits this file; see [SplitRequest.byDuration]. */
 suspend fun File.splitTo(
@@ -219,8 +250,10 @@ suspend fun File.splitTo(
     segmentDuration: Duration,
     fileNamePrefix: String,
     containerExtension: String,
+    onProgress: ((MediaProgress) -> Unit)? = null,
 ): SplitResult = FFmpeg.split(
     SplitRequest.byDuration(MediaInput.of(this), outputDirectory, segmentDuration, fileNamePrefix, containerExtension),
+    onProgress,
 )
 
 /** Splits the content behind this Uri; see [SplitRequest.byDuration]. */
@@ -230,8 +263,10 @@ suspend fun Uri.splitTo(
     segmentDuration: Duration,
     fileNamePrefix: String,
     containerExtension: String,
+    onProgress: ((MediaProgress) -> Unit)? = null,
 ): SplitResult = FFmpeg.split(
     SplitRequest.byDuration(MediaInput.of(resolver, this), outputDirectory, segmentDuration, fileNamePrefix, containerExtension),
+    onProgress,
 )
 
 /** Splits this file into one segment per range; see [SplitRequest.byRanges]. */
@@ -240,8 +275,10 @@ suspend fun File.splitTo(
     ranges: List<TimeRange>,
     fileNamePrefix: String,
     containerExtension: String,
+    onProgress: ((MediaProgress) -> Unit)? = null,
 ): SplitResult = FFmpeg.split(
     SplitRequest.byRanges(MediaInput.of(this), outputDirectory, ranges, fileNamePrefix, containerExtension),
+    onProgress,
 )
 
 /** Splits the content behind this Uri into one segment per range; see [SplitRequest.byRanges]. */
@@ -251,8 +288,10 @@ suspend fun Uri.splitTo(
     ranges: List<TimeRange>,
     fileNamePrefix: String,
     containerExtension: String,
+    onProgress: ((MediaProgress) -> Unit)? = null,
 ): SplitResult = FFmpeg.split(
     SplitRequest.byRanges(MediaInput.of(resolver, this), outputDirectory, ranges, fileNamePrefix, containerExtension),
+    onProgress,
 )
 
 /** Probes this file; see [FFmpeg.probe]. */
@@ -260,3 +299,44 @@ suspend fun File.probe(): MediaInfo = FFmpeg.probe(MediaInput.of(this))
 
 /** Probes the content behind this Uri; see [FFmpeg.probe]. */
 suspend fun Uri.probe(resolver: ContentResolver): MediaInfo = FFmpeg.probe(MediaInput.of(resolver, this))
+
+// v1.1.0 signatures without onProgress, kept for code compiled against that release.
+
+@Deprecated("Binary compatibility with v1.1.0", level = DeprecationLevel.HIDDEN)
+suspend fun File.trimTo(output: File, start: Duration, endExclusive: Duration? = null, mode: TrimMode = TrimMode.KEYFRAME): TrimResult =
+    trimTo(output, start, endExclusive, mode, null)
+
+@Deprecated("Binary compatibility with v1.1.0", level = DeprecationLevel.HIDDEN)
+suspend fun Uri.trimTo(
+    resolver: ContentResolver,
+    output: File,
+    start: Duration,
+    endExclusive: Duration? = null,
+    mode: TrimMode = TrimMode.KEYFRAME,
+): TrimResult = trimTo(resolver, output, start, endExclusive, mode, null)
+
+@Deprecated("Binary compatibility with v1.1.0", level = DeprecationLevel.HIDDEN)
+suspend fun File.splitTo(outputDirectory: File, segmentDuration: Duration, fileNamePrefix: String, containerExtension: String): SplitResult =
+    splitTo(outputDirectory, segmentDuration, fileNamePrefix, containerExtension, null)
+
+@Deprecated("Binary compatibility with v1.1.0", level = DeprecationLevel.HIDDEN)
+suspend fun Uri.splitTo(
+    resolver: ContentResolver,
+    outputDirectory: File,
+    segmentDuration: Duration,
+    fileNamePrefix: String,
+    containerExtension: String,
+): SplitResult = splitTo(resolver, outputDirectory, segmentDuration, fileNamePrefix, containerExtension, null)
+
+@Deprecated("Binary compatibility with v1.1.0", level = DeprecationLevel.HIDDEN)
+suspend fun File.splitTo(outputDirectory: File, ranges: List<TimeRange>, fileNamePrefix: String, containerExtension: String): SplitResult =
+    splitTo(outputDirectory, ranges, fileNamePrefix, containerExtension, null)
+
+@Deprecated("Binary compatibility with v1.1.0", level = DeprecationLevel.HIDDEN)
+suspend fun Uri.splitTo(
+    resolver: ContentResolver,
+    outputDirectory: File,
+    ranges: List<TimeRange>,
+    fileNamePrefix: String,
+    containerExtension: String,
+): SplitResult = splitTo(resolver, outputDirectory, ranges, fileNamePrefix, containerExtension, null)

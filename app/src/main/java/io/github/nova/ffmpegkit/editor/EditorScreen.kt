@@ -52,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.compose.AsyncImage
+import io.github.nova.ffmpegkit.MediaProgress
 import io.github.nova.ffmpegkit.StreamInfo
 import io.github.nova.ffmpegkit.TimeRange
 import io.github.nova.ffmpegkit.TrimMode
@@ -251,6 +252,19 @@ private fun EditSection(
     }
 }
 
+/** What the progress bar stands for; at 0.99 the library is copying or renaming the output into place. */
+private fun describe(progress: MediaProgress): String {
+    val fraction = progress.fraction
+    val stage = when {
+        fraction == 1.0 -> "Saving to the gallery…" // split segments are copied into MediaStore after the library returns
+        fraction != null && fraction >= 0.99 -> "Saving…"
+        else -> "Writing segment ${progress.segmentIndex}"
+    }
+    val total = progress.total?.let { " of ${formatSeconds(it)} s" } ?: ""
+    val speed = progress.speed?.let { String.format(Locale.ROOT, ", %.1f×", it) } ?: ""
+    return "$stage: ${formatSeconds(progress.processed)} s$total$speed"
+}
+
 @Composable
 private fun ResultSection(task: Task, onCancel: () -> Unit) {
     val context = LocalContext.current
@@ -259,7 +273,13 @@ private fun ResultSection(task: Task, onCancel: () -> Unit) {
             Task.Idle -> Unit
             is Task.Running -> {
                 Text(task.description)
-                LinearProgressIndicator(Modifier.fillMaxWidth())
+                val fraction = task.progress?.fraction
+                if (fraction == null) {
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                } else {
+                    LinearProgressIndicator(progress = { fraction.toFloat() }, modifier = Modifier.fillMaxWidth())
+                }
+                task.progress?.let { Text(describe(it), style = MaterialTheme.typography.bodySmall) }
                 OutlinedButton(onClick = onCancel) { Text("Cancel") }
             }
             Task.Cancelled -> Text("Cancelled. Nothing was saved.")

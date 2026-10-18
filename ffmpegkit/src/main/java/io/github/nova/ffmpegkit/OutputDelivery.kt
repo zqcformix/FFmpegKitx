@@ -1,5 +1,6 @@
 package io.github.nova.ffmpegkit
 
+import android.os.Build
 import io.github.nova.ffmpegkit.FFmpegException.Reason
 import java.io.File
 import java.io.IOException
@@ -10,10 +11,31 @@ import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
+import java.util.concurrent.atomic.AtomicLong
 
 internal enum class DeliveryMethod { RENAME, HARD_LINK, COPY }
 
 internal class Delivered<T>(val value: T, val method: DeliveryMethod)
+
+/**
+ * How many of an operation's output bytes are delivered, for progress (roadmap 5.2). Outputs are
+ * [expect]ed once written; a rename or link delivers a whole file at once, a copy counts as it goes.
+ */
+internal class DeliveryMeter {
+    private val expected = AtomicLong()
+    private val delivered = AtomicLong()
+
+    val expectedBytes: Long get() = expected.get()
+    val deliveredBytes: Long get() = delivered.get()
+
+    fun expect(bytes: Long) {
+        expected.addAndGet(bytes)
+    }
+
+    fun delivered(bytes: Long) {
+        delivered.addAndGet(bytes)
+    }
+}
 
 /**
  * Writes an output through a temporary file in the target's directory and publishes it without ever
@@ -38,8 +60,9 @@ internal object OutputDelivery {
     fun <T> deliver(
         input: File?,
         target: File,
+        meter: DeliveryMeter? = null,
         publish: (target: Path, temp: Path) -> DeliveryMethod = ::publishAtomically,
-        copy: (source: Path, target: FileChannel) -> Unit = ::copyAll,
+        copy: (source: Path, target: FileChannel) -> Unit = { source, channel -> copyAll(source, channel, meter) },
         identity: (Path) -> Any? = ::fileKey,
         write: (temp: File) -> T,
     ): Delivered<T> {
@@ -50,7 +73,8 @@ internal object OutputDelivery {
         var failure: Throwable? = null
         try {
             val value = write(temp)
-            val method = publishOrCopy(temp.toPath(), target.toPath(), publish, copy, identity)
+            meter?.expect(temp.length())
+            val method = publishOrCopy(temp.toPath(), target.toPath(), meter, publish, copy, identity)
             return Delivered(value, method)
         } catch (e: Throwable) {
             failure = e
@@ -66,15 +90,23 @@ internal object OutputDelivery {
     /**
      * Publishes an already written [temp] at [target] the same way [deliver] does. [temp] must be on
      * the same file system as [target] (for example in a temporary directory next to it). The caller
-     * removes [temp] afterwards if it still exists.
+     * removes [temp] afterwards if it still exists. [temp] must already be [DeliveryMeter.expect]ed.
      */
     fun publishFile(
         temp: File,
         target: File,
+        meter: DeliveryMeter? = null,
         publish: (target: Path, temp: Path) -> DeliveryMethod = ::publishAtomically,
-        copy: (source: Path, target: FileChannel) -> Unit = ::copyAll,
+        copy: (source: Path, target: FileChannel) -> Unit = { source, channel -> copyAll(source, channel, meter) },
         identity: (Path) -> Any? = ::fileKey,
-    ): DeliveryMethod = publishOrCopy(temp.toPath(), target.toPath(), publish, copy, identity)
+    ): DeliveryMethod = publishOrCopy(temp.toPath(), target.toPath(), meter, publish, copy, identity)
+
+    /**
+     * Whether delivering a local file is expected to copy it: before Android 11 there is no
+     * `renameat2`, and Android's SELinux policy denies the hard link. Only used to weigh progress.
+     */
+    val expectsCopy: Boolean
+        get() = !NativeFiles.available || Build.VERSION.SDK_INT < Build.VERSION_CODES.R
 
     /** Identity (device and inode) of [file], or null where the platform has none or it is missing. */
     fun identityOf(file: File): Any? = fileKey(file.toPath())
@@ -106,12 +138,14 @@ internal object OutputDelivery {
     private fun publishOrCopy(
         temp: Path,
         target: Path,
+        meter: DeliveryMeter?,
         atomic: (Path, Path) -> DeliveryMethod,
         copy: (Path, FileChannel) -> Unit,
         identity: (Path) -> Any?,
     ): DeliveryMethod {
         try {
-            return atomic(target, temp)
+            val size = if (meter != null) Files.size(temp) else 0L
+            return atomic(target, temp).also { meter?.delivered(size) }
         } catch (e: FileAlreadyExistsException) {
             throw FFmpegException(Reason.OUTPUT_EXISTS, "output already exists: $target", cause = e)
         } catch (unsupported: UnsupportedOperationException) {
@@ -169,14 +203,15 @@ internal object OutputDelivery {
         }
     }
 
-    private fun copyAll(source: Path, target: FileChannel) {
+    private fun copyAll(source: Path, target: FileChannel, meter: DeliveryMeter?) {
         FileChannel.open(source, StandardOpenOption.READ).use { input ->
             val size = input.size()
             var position = 0L
             while (position < size) {
-                val copied = target.transferFrom(input, position, size - position)
+                val copied = target.transferFrom(input, position, minOf(COPY_CHUNK, size - position))
                 if (copied <= 0) throw IOException("copy stopped at $position of $size bytes")
                 position += copied
+                meter?.delivered(copied)
             }
         }
     }
@@ -188,6 +223,9 @@ internal object OutputDelivery {
 
     // Keeps temporary names well below the 255-byte limit even for long multi-byte names.
     private const val MAX_PREFIX_CHARS = 40
+
+    /** Copies go in chunks of this many bytes so that progress moves during long copies. */
+    const val COPY_CHUNK = 8L * 1024 * 1024
 }
 
 internal object NativeFiles {
