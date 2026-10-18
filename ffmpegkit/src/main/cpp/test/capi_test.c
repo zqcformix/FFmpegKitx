@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ---- Layout pins --------------------------------------------------------------------------------- */
@@ -96,6 +97,12 @@ PIN_FIELD(ffkx_format_info, start_time_us, 8);
 PIN_FIELD(ffkx_format_info, duration_us, 16);
 PIN_FIELD(ffkx_format_info, bit_rate, 24);
 PIN_FIELD(ffkx_format_info, format_name, 32);
+
+PIN_SIZE(ffkx_engine_log_sink, 8 + 3 * P);
+PIN_FIELD(ffkx_engine_log_sink, level, 4);
+PIN_FIELD(ffkx_engine_log_sink, callback, 8);
+PIN_FIELD(ffkx_engine_log_sink, user_data, 8 + P);
+PIN_FIELD(ffkx_engine_log_sink, release, 8 + 2 * P);
 
 PIN_SIZE(ffkx_stream_info, 88 + 2 * P);
 PIN_FIELD(ffkx_stream_info, media_type, 4);
@@ -451,7 +458,7 @@ static void task_options_versions(void) {
     ffkx_task* task = NULL;
     CHECK_STATUS(FFKX_OK, ffkx_task_create(NULL, &task));
     CHECK(task != NULL);
-    ffkx_task_destroy(task);
+    ffkx_task_release(task);
 
     struct {
         ffkx_task_options known;
@@ -460,7 +467,7 @@ static void task_options_versions(void) {
     memset(&newer, 0, sizeof(newer));
     newer.known.struct_size = sizeof(newer);
     CHECK_STATUS(FFKX_OK, ffkx_task_create(&newer.known, &task));
-    ffkx_task_destroy(task);
+    ffkx_task_release(task);
     newer.added = 5;
     CHECK_STATUS(FFKX_ERROR_UNSUPPORTED_VERSION, ffkx_task_create(&newer.known, &task));
     CHECK(task == NULL);
@@ -496,7 +503,7 @@ static void task_options_versions(void) {
     progress.known.struct_size = 4;
     CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_task_progress(task, &progress.known));
     CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_task_progress(NULL, &progress.known));
-    ffkx_task_destroy(task);
+    ffkx_task_release(task);
 }
 
 /* ---- Trim ---------------------------------------------------------------------------------------- */
@@ -640,7 +647,7 @@ static void trim_failures(void) {
     CHECK_STATUS(FFKX_ERROR_INVALID_MEDIA, ffkx_trim(&options, task, NULL, &error));
     CHECK_I64(FFMPEG_INVALIDDATA, error.ffmpeg_error);
     CHECK(log_contains(task, "moov atom not found"));
-    ffkx_task_destroy(task);
+    ffkx_task_release(task);
 }
 
 static void trim_arguments(void) {
@@ -726,7 +733,7 @@ static void split_segments(void) {
     CHECK_I64(4, progress.segment);
     CHECK_I64(10000000, progress.processed_us);
     ffkx_split_result_free(result);
-    ffkx_task_destroy(task);
+    ffkx_task_release(task);
 
     /* Without a prefix the names are just numbers; the result pointer may be NULL. */
     directory = new_directory("split-plain");
@@ -915,7 +922,7 @@ static void task_progress(void) {
     CHECK_I64(3000000, progress.processed_us);
     CHECK(progress.bytes_written > first_bytes);
     CHECK_I64(2, progress.segment);
-    ffkx_task_destroy(task);
+    ffkx_task_release(task);
 }
 
 static void task_logs(void) {
@@ -942,7 +949,7 @@ static void task_logs(void) {
     entry.struct_size = sizeof(entry);
     CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_log_entry_at(log, 5, &entry));
     ffkx_log_free(log);
-    ffkx_task_destroy(task);
+    ffkx_task_release(task);
 
     /* A task that keeps nothing still counts. */
     task = new_task(FFKX_LOG_DEBUG, 0);
@@ -951,7 +958,7 @@ static void task_logs(void) {
     CHECK_I64(0, ffkx_log_count(log));
     CHECK(ffkx_log_dropped(log) > 0);
     ffkx_log_free(log);
-    ffkx_task_destroy(task);
+    ffkx_task_release(task);
 
     CHECK_I64(0, ffkx_log_count(NULL));
     CHECK_I64(0, ffkx_log_dropped(NULL));
@@ -982,11 +989,11 @@ static void cancel_before_start(void) {
     probe.struct_size = sizeof(probe);
     probe.input_path = sample(AV);
     CHECK_STATUS(FFKX_ERROR_CANCELLED, ffkx_probe(&probe, task, NULL, NULL));
-    ffkx_task_destroy(task);
+    ffkx_task_release(task);
 
     ffkx_task_cancel(NULL);
     ffkx_task_set_segment(NULL, 1);
-    ffkx_task_destroy(NULL);
+    ffkx_task_release(NULL);
     CHECK_I64(0, ffkx_task_is_cancelled(NULL));
 }
 
@@ -997,6 +1004,7 @@ struct split_run {
     ffkx_status status;
     int has_result;
     atomic_int done;
+    int release_when_done; /* the worker owns a reference and releases it after the split */
 };
 
 static void* run_split(void* argument) {
@@ -1006,8 +1014,22 @@ static void* run_split(void* argument) {
     run->status = ffkx_split(&options, run->task, &result, NULL);
     run->has_result = result != NULL;
     ffkx_split_result_free(result);
+    if (run->release_when_done) ffkx_task_release(run->task);
     atomic_store(&run->done, 1);
     return NULL;
+}
+
+/* Waits until the split is writing its second segment (1), or has ended first (0). */
+static int wait_for_second_segment(struct split_run* run, ffkx_task* task) {
+    while (!atomic_load(&run->done)) {
+        ffkx_progress progress;
+        memset(&progress, 0, sizeof(progress));
+        progress.struct_size = sizeof(progress);
+        ffkx_task_progress(task, &progress);
+        if (progress.segment >= 2) return 1;
+        sched_yield();
+    }
+    return 0;
 }
 
 /* Cancels a split from another thread once it is writing its second segment. The samples are small, so
@@ -1016,24 +1038,13 @@ static void cancel_while_running(void) {
     for (int attempt = 0; attempt < 20; ++attempt) {
         char name[32];
         snprintf(name, sizeof(name), "cancel-%d", attempt);
-        struct split_run run = {new_task(FFKX_LOG_WARNING, 10), new_directory(name), FFKX_OK, 0, 0};
+        struct split_run run = {new_task(FFKX_LOG_WARNING, 10), new_directory(name), FFKX_OK, 0, 0, 0};
         pthread_t thread;
         CHECK(pthread_create(&thread, NULL, run_split, &run) == 0);
-        int cancelled = 0;
-        while (!atomic_load(&run.done)) {
-            ffkx_progress progress;
-            memset(&progress, 0, sizeof(progress));
-            progress.struct_size = sizeof(progress);
-            ffkx_task_progress(run.task, &progress);
-            if (progress.segment >= 2) {
-                ffkx_task_cancel(run.task);
-                cancelled = 1;
-                break;
-            }
-            sched_yield();
-        }
+        const int cancelled = wait_for_second_segment(&run, run.task);
+        if (cancelled) ffkx_task_cancel(run.task);
         pthread_join(thread, NULL);
-        ffkx_task_destroy(run.task);
+        ffkx_task_release(run.task);
         if (cancelled && run.status == FFKX_ERROR_CANCELLED) {
             CHECK(!run.has_result);
             return;
@@ -1042,6 +1053,390 @@ static void cancel_while_running(void) {
         CHECK(run.has_result);
     }
     skip("every split finished before its second segment was seen");
+}
+
+/* ---- References and races (roadmap 6.2) ---------------------------------------------------------- */
+
+static void task_references(void) {
+    ffkx_task* task = new_task(FFKX_LOG_WARNING, 10);
+    CHECK(ffkx_task_retain(task) == task);
+    CHECK(ffkx_task_retain(NULL) == NULL);
+    ffkx_task_release(task);
+    /* One reference left: still usable. */
+    ffkx_task_cancel(task);
+    CHECK_I64(1, ffkx_task_is_cancelled(task));
+    ffkx_task_release(task);
+    ffkx_task_release(NULL);
+}
+
+/* The main thread drops its reference while the worker's split runs on its own: the split finishes. */
+static void release_while_running(void) {
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        char name[32];
+        snprintf(name, sizeof(name), "release-%d", attempt);
+        ffkx_task* task = new_task(FFKX_LOG_WARNING, 10);
+        struct split_run run = {ffkx_task_retain(task), new_directory(name), FFKX_OK, 0, 0, 1};
+        pthread_t thread;
+        CHECK(pthread_create(&thread, NULL, run_split, &run) == 0);
+        const int midway = wait_for_second_segment(&run, task);
+        ffkx_task_release(task); /* the worker's reference keeps the task until it is done */
+        pthread_join(thread, NULL);
+        CHECK_STATUS(FFKX_OK, run.status);
+        CHECK(run.has_result);
+        if (midway) return;
+    }
+    skip("every split finished before its second segment was seen");
+}
+
+/* A second operation on a task that is running one is refused, without touching the first. */
+static void busy_task(void) {
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        char name[32];
+        snprintf(name, sizeof(name), "busy-%d", attempt);
+        ffkx_task* task = new_task(FFKX_LOG_WARNING, 10);
+        struct split_run run = {task, new_directory(name), FFKX_OK, 0, 0, 0};
+        pthread_t thread;
+        CHECK(pthread_create(&thread, NULL, run_split, &run) == 0);
+        const int midway = wait_for_second_segment(&run, task);
+        ffkx_status second = FFKX_OK;
+        ffkx_error error = new_error();
+        const char* output = scratch("busy.mp4");
+        if (midway) {
+            ffkx_trim_options options = trim_options(av_path, output, 0, 1000000);
+            second = ffkx_trim(&options, task, NULL, &error);
+        }
+        pthread_join(thread, NULL);
+        CHECK_STATUS(FFKX_OK, run.status);
+        if (midway && second != FFKX_OK) {
+            CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, second);
+            CHECK_STR("task is running another operation", error.message);
+            CHECK_I64(-1, file_size(output));
+            /* Free again once the first is done. */
+            ffkx_trim_options options = trim_options(av_path, output, 0, 1000000);
+            CHECK_STATUS(FFKX_OK, ffkx_trim(&options, task, NULL, NULL));
+            ffkx_task_release(task);
+            return;
+        }
+        unlink(output);
+        ffkx_task_release(task);
+    }
+    skip("every split finished before the second operation started");
+}
+
+struct canceller {
+    ffkx_task* task;
+    long delay_ns;
+};
+
+static void* cancel_later(void* argument) {
+    struct canceller* canceller = argument;
+    const struct timespec delay = {0, canceller->delay_ns};
+    nanosleep(&delay, NULL);
+    ffkx_task_cancel(canceller->task);
+    ffkx_task_release(canceller->task);
+    return NULL;
+}
+
+/* Cancelling and releasing race with the operation and with each other: three threads, three references,
+ * released in whatever order the timing gives. */
+static void cancel_release_races(void) {
+    int cancelled = 0, finished = 0;
+    for (int round = 0; round < 40; ++round) {
+        char name[32];
+        snprintf(name, sizeof(name), "race-%d", round);
+        ffkx_task* task = new_task(FFKX_LOG_DEBUG, 50);
+        struct split_run run = {ffkx_task_retain(task), new_directory(name), FFKX_OK, 0, 0, 1};
+        /* 0 to 32 ms: early cancellations and ones after the split ended, on fast and slow devices. */
+        struct canceller canceller = {ffkx_task_retain(task), (long)(round % 10) * (round % 10) * 400000L};
+        pthread_t worker, cancelling;
+        CHECK(pthread_create(&worker, NULL, run_split, &run) == 0);
+        CHECK(pthread_create(&cancelling, NULL, cancel_later, &canceller) == 0);
+        ffkx_task_release(task);
+        pthread_join(worker, NULL);
+        pthread_join(cancelling, NULL);
+        CHECK(run.status == FFKX_OK || run.status == FFKX_ERROR_CANCELLED);
+        CHECK(run.has_result == (run.status == FFKX_OK));
+        if (run.status == FFKX_OK) ++finished; else ++cancelled;
+    }
+    printf("     cancel_release_races: %d cancelled, %d finished\n", cancelled, finished);
+}
+
+/* ---- Engine log sink (roadmap 6.2) --------------------------------------------------------------- */
+
+#define SINK_ALIVE 0x5A5A5A5A
+#define SINK_DEAD 0xDEADDEAD
+
+/* A sink's user data. Released sinks are marked dead and kept, so a late call is seen, not a crash. */
+struct recorder {
+    atomic_uint magic;
+    atomic_int calls;
+    atomic_int releases;
+    atomic_int in_callback;
+    int released_while_in_callback;
+    int32_t last_level;
+    char last_component[64];
+    char last_message[256];
+    struct recorder* install_from_callback; /* installed by the first call, once */
+};
+
+static atomic_int late_calls; /* calls on a released sink */
+
+static void record_line(void* user_data, int32_t level, const char* component, const char* message) {
+    struct recorder* recorder = user_data;
+    atomic_fetch_add(&recorder->in_callback, 1);
+    if (atomic_load(&recorder->magic) != SINK_ALIVE) atomic_fetch_add(&late_calls, 1);
+    if (atomic_fetch_add(&recorder->calls, 1) == 0) {
+        recorder->last_level = level;
+        snprintf(recorder->last_component, sizeof(recorder->last_component), "%s", component);
+        snprintf(recorder->last_message, sizeof(recorder->last_message), "%s", message);
+        struct recorder* next = recorder->install_from_callback;
+        if (next != NULL) {
+            recorder->install_from_callback = NULL;
+            ffkx_engine_log_sink sink;
+            memset(&sink, 0, sizeof(sink));
+            sink.struct_size = sizeof(sink);
+            sink.level = FFKX_LOG_ERROR;
+            sink.callback = record_line;
+            sink.user_data = next;
+            ffkx_set_engine_log_sink(&sink);
+        }
+    }
+    atomic_fetch_sub(&recorder->in_callback, 1);
+}
+
+static void release_recorder(void* user_data) {
+    struct recorder* recorder = user_data;
+    /* Dead first: a callback that starts after this sees it, one that started before is counted here. */
+    atomic_store(&recorder->magic, SINK_DEAD);
+    if (atomic_load(&recorder->in_callback) != 0) recorder->released_while_in_callback = 1;
+    atomic_fetch_add(&recorder->releases, 1);
+}
+
+static void new_recorder(struct recorder* recorder) {
+    memset(recorder, 0, sizeof(*recorder));
+    atomic_store(&recorder->magic, SINK_ALIVE);
+}
+
+static ffkx_status install(struct recorder* recorder, int32_t level) {
+    ffkx_engine_log_sink sink;
+    memset(&sink, 0, sizeof(sink));
+    sink.struct_size = sizeof(sink);
+    sink.level = level;
+    sink.callback = record_line;
+    sink.user_data = recorder;
+    sink.release = release_recorder;
+    return ffkx_set_engine_log_sink(&sink);
+}
+
+/* A probe of the truncated sample logs "moov atom not found" at error level. */
+static void probe_truncated(const char* path, ffkx_task* task) {
+    ffkx_probe_options options;
+    memset(&options, 0, sizeof(options));
+    options.struct_size = sizeof(options);
+    options.input_path = path;
+    ffkx_probe(&options, task, NULL, NULL);
+}
+
+static void engine_sink(void) {
+    const char* truncated = truncated_sample();
+    struct recorder first, second;
+    new_recorder(&first);
+    CHECK_STATUS(FFKX_OK, install(&first, FFKX_LOG_ERROR));
+    probe_truncated(truncated, NULL);
+    const int calls = atomic_load(&first.calls);
+    CHECK(calls >= 1);
+    CHECK_I64(FFKX_LOG_ERROR, first.last_level);
+    CHECK_STR("mov,mp4,m4a,3gp,3g2,mj2", first.last_component);
+    CHECK_STR("moov atom not found", first.last_message);
+
+    /* Lines of an operation with a task go to its log, not to the sink. */
+    ffkx_task* task = new_task(FFKX_LOG_ERROR, 10);
+    probe_truncated(truncated, task);
+    CHECK_I64(calls, atomic_load(&first.calls));
+    CHECK(log_contains(task, "moov atom not found"));
+    ffkx_task_release(task);
+
+    /* Replacing a sink no thread is in releases it at once, exactly once. */
+    new_recorder(&second);
+    CHECK_STATUS(FFKX_OK, install(&second, FFKX_LOG_PANIC));
+    CHECK_I64(1, atomic_load(&first.releases));
+    probe_truncated(truncated, NULL); /* an error is less severe than panic: filtered */
+    CHECK_I64(0, atomic_load(&second.calls));
+    CHECK_STATUS(FFKX_OK, ffkx_set_engine_log_sink(NULL));
+    CHECK_I64(1, atomic_load(&second.releases));
+    CHECK_I64(1, atomic_load(&first.releases));
+
+    /* A rejected sink is neither installed nor released. */
+    struct recorder rejected;
+    new_recorder(&rejected);
+    ffkx_engine_log_sink sink;
+    memset(&sink, 0, sizeof(sink));
+    sink.struct_size = sizeof(sink);
+    sink.user_data = &rejected;
+    sink.release = release_recorder;
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_set_engine_log_sink(&sink));
+    sink.callback = record_line;
+    sink.struct_size = 8;
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_set_engine_log_sink(&sink));
+    CHECK_I64(0, atomic_load(&rejected.releases));
+
+    /* A callback may install another sink: the next line goes there, and the first is released after
+     * its callback returned. */
+    struct recorder outer, inner;
+    new_recorder(&outer);
+    new_recorder(&inner);
+    outer.install_from_callback = &inner;
+    CHECK_STATUS(FFKX_OK, install(&outer, FFKX_LOG_ERROR));
+    probe_truncated(truncated, NULL);
+    CHECK_I64(1, atomic_load(&outer.releases));
+    CHECK_I64(0, outer.released_while_in_callback);
+    probe_truncated(truncated, NULL);
+    CHECK_I64(1, atomic_load(&outer.calls));
+    CHECK(atomic_load(&inner.calls) >= 1);
+    CHECK_STATUS(FFKX_OK, ffkx_set_engine_log_sink(NULL));
+    CHECK_I64(0, atomic_load(&late_calls));
+}
+
+/* A sink whose callback tries to run an operation, which the contract forbids: the library refuses it, and
+ * the line being sent is neither sent again nor changed. */
+struct nested {
+    int calls;
+    ffkx_status nested_status;
+    char message[256];
+    char message_after[256];
+    const char* path;
+};
+
+static void run_operation_in_callback(void* user_data, int32_t level, const char* component, const char* message) {
+    struct nested* nested = user_data;
+    (void)level;
+    (void)component;
+    if (nested->calls++ > 0) return;
+    snprintf(nested->message, sizeof(nested->message), "%s", message);
+    ffkx_probe_options options;
+    memset(&options, 0, sizeof(options));
+    options.struct_size = sizeof(options);
+    options.input_path = nested->path;
+    ffkx_error error = new_error();
+    nested->nested_status = ffkx_probe(&options, NULL, NULL, &error);
+    snprintf(nested->message_after, sizeof(nested->message_after), "%s", message);
+}
+
+static void engine_sink_reentry(void) {
+    struct nested nested;
+    memset(&nested, 0, sizeof(nested));
+    nested.path = scratch("truncated.mp4");
+    ffkx_engine_log_sink sink;
+    memset(&sink, 0, sizeof(sink));
+    sink.struct_size = sizeof(sink);
+    sink.level = FFKX_LOG_ERROR;
+    sink.callback = run_operation_in_callback;
+    sink.user_data = &nested;
+    CHECK_STATUS(FFKX_OK, ffkx_set_engine_log_sink(&sink));
+    probe_truncated(nested.path, NULL);
+    CHECK_STATUS(FFKX_OK, ffkx_set_engine_log_sink(NULL));
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, nested.nested_status);
+    CHECK_STR("moov atom not found", nested.message);
+    CHECK_STR("moov atom not found", nested.message_after);
+    CHECK(nested.calls >= 1);
+}
+
+/* Two threads install sinks at the same time, one with a debug level, one with error: afterwards the
+ * level the library filters by is the installed sink's, so the debug sink gets the debug lines of a
+ * probe that logs no error. */
+struct setter {
+    struct recorder* recorder;
+    int32_t level;
+    pthread_barrier_t* start;
+};
+
+static void* install_at_once(void* argument) {
+    struct setter* setter = argument;
+    pthread_barrier_wait(setter->start);
+    install(setter->recorder, setter->level);
+    return NULL;
+}
+
+static void engine_sink_concurrent_setters(void) {
+    /* Without the lock in SetEngineSink this caught about one mismatch in 400 rounds on the emulator. */
+    enum { kRounds = 1000 };
+    int mismatches = 0, debug_won = 0;
+    for (int round = 0; round < kRounds; ++round) {
+        struct recorder debug, error;
+        new_recorder(&debug);
+        new_recorder(&error);
+        pthread_barrier_t start;
+        pthread_barrier_init(&start, NULL, 2);
+        struct setter setters[2] = {{&debug, FFKX_LOG_DEBUG, &start}, {&error, FFKX_LOG_ERROR, &start}};
+        pthread_t threads[2];
+        for (int i = 0; i < 2; ++i) pthread_create(&threads[i], NULL, install_at_once, &setters[i]);
+        for (int i = 0; i < 2; ++i) pthread_join(threads[i], NULL);
+        pthread_barrier_destroy(&start);
+        /* The one not yet released is installed. */
+        const int debug_installed = atomic_load(&debug.releases) == 0;
+        CHECK_I64(1, atomic_load(&debug.releases) + atomic_load(&error.releases));
+        probe_truncated(av_path, NULL); /* a valid file: debug lines, no error */
+        if (debug_installed) {
+            ++debug_won;
+            if (atomic_load(&debug.calls) == 0) ++mismatches;
+        }
+        CHECK_STATUS(FFKX_OK, ffkx_set_engine_log_sink(NULL));
+    }
+    CHECK_I64(0, mismatches);
+    CHECK_I64(0, atomic_load(&late_calls));
+    printf("     engine_sink_concurrent_setters: debug sink won %d of %d rounds\n", debug_won, kRounds);
+}
+
+struct logger {
+    const char* path;
+    atomic_int* stop;
+    int probes;
+};
+
+static void* log_until_stopped(void* argument) {
+    struct logger* logger = argument;
+    while (!atomic_load(logger->stop)) {
+        probe_truncated(logger->path, NULL);
+        ++logger->probes;
+    }
+    return NULL;
+}
+
+/* Sinks replaced while four threads log through them: every sink is released exactly once, never while a
+ * thread is in its callback, and no callback runs after its release. */
+static void engine_sink_races(void) {
+    enum { kSinks = 400, kLoggers = 4 };
+    static struct recorder sinks[kSinks];
+    const char* truncated = scratch("truncated.mp4"); /* written by engine_sink */
+    atomic_int stop;
+    atomic_init(&stop, 0);
+    struct logger loggers[kLoggers];
+    pthread_t threads[kLoggers];
+    for (int i = 0; i < kLoggers; ++i) {
+        loggers[i] = (struct logger){truncated, &stop, 0};
+        CHECK(pthread_create(&threads[i], NULL, log_until_stopped, &loggers[i]) == 0);
+    }
+    for (int i = 0; i < kSinks; ++i) {
+        new_recorder(&sinks[i]);
+        CHECK_STATUS(FFKX_OK, install(&sinks[i], FFKX_LOG_ERROR));
+        const struct timespec pause = {0, 50000};
+        nanosleep(&pause, NULL);
+    }
+    CHECK_STATUS(FFKX_OK, ffkx_set_engine_log_sink(NULL));
+    atomic_store(&stop, 1);
+    int probes = 0, calls = 0, wrong = 0;
+    for (int i = 0; i < kLoggers; ++i) {
+        pthread_join(threads[i], NULL);
+        probes += loggers[i].probes;
+    }
+    for (int i = 0; i < kSinks; ++i) {
+        calls += atomic_load(&sinks[i].calls);
+        if (atomic_load(&sinks[i].releases) != 1 || sinks[i].released_while_in_callback) ++wrong;
+    }
+    CHECK_I64(0, wrong);
+    CHECK_I64(0, atomic_load(&late_calls));
+    CHECK(calls > 0);
+    printf("     engine_sink_races: %d probes, %d lines to %d sinks\n", probes, calls, kSinks);
 }
 
 struct parallel_trim {
@@ -1059,7 +1454,7 @@ static void* run_trim(void* argument) {
     ffkx_trim_options options = trim_options(av_path, trim->output, trim->start_us, trim->start_us + 1000000);
     trim->result = new_trim_result();
     trim->status = ffkx_trim(&options, task, &trim->result, NULL);
-    ffkx_task_destroy(task);
+    ffkx_task_release(task);
     return NULL;
 }
 
@@ -1111,6 +1506,14 @@ int main(int argc, char** argv) {
     run("cancel_before_start", cancel_before_start);
     run("cancel_while_running", cancel_while_running);
     run("parallel_operations", parallel_operations);
+    run("task_references", task_references);
+    run("release_while_running", release_while_running);
+    run("busy_task", busy_task);
+    run("cancel_release_races", cancel_release_races);
+    run("engine_sink", engine_sink);
+    run("engine_sink_reentry", engine_sink_reentry);
+    run("engine_sink_concurrent_setters", engine_sink_concurrent_setters);
+    run("engine_sink_races", engine_sink_races);
 
     printf("ffkx_capi_test: %d checks, %d failed, %d skipped\n", checks, failures, skips);
     return failures == 0 ? 0 : 1;

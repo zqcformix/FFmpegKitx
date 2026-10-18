@@ -78,3 +78,16 @@ set_source_files_properties(test/header_cxx11.cpp PROPERTIES COMPILE_OPTIONS "-s
 
 # Every build compiles the test program, whose layout pins are static assertions, and the header checks.
 add_dependencies(${CMAKE_PROJECT_NAME} ffkx_capi_test ffkx_header_check)
+
+# ASan C ABI test runs (`connectedCapiTest -PcapiTestAsan`): instruments the core and the test program,
+# which is then named ffkx_capi_test-asan. Never for a published build. Not HWASan: on a production
+# Android 14 device it reports every write to memory the prebuilt FFmpeg allocated, which carries the
+# system allocator's pointer tag (0xb4) instead of a HWASan tag.
+option(FFKX_ASAN "Instrument libffmpegkitx_core and the C ABI test with AddressSanitizer" OFF)
+if(FFKX_ASAN)
+    foreach(target ffmpegkitx_core ffkx_capi_test)
+        target_compile_options(${target} PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+        target_link_options(${target} PRIVATE -fsanitize=address)
+    endforeach()
+    set_target_properties(ffkx_capi_test PROPERTIES OUTPUT_NAME ffkx_capi_test-asan)
+endif()

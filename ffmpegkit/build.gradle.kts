@@ -11,6 +11,11 @@ plugins {
     id("maven-publish")
 }
 
+// Test-only: `-PcapiTestAsan` (or `=true`) builds an AddressSanitizer core for connectedCapiTest. It applies to
+// the debug build type only, so release and published AARs never get it.
+val capiTestAsan: Provider<Boolean> =
+    providers.gradleProperty("capiTestAsan").map { it.isEmpty() || it.toBoolean() }.orElse(false)
+
 android {
     namespace = "io.github.nova.ffmpegkit"
     compileSdk = rootProject.extra["compileSdk"].toString().toInt()
@@ -41,6 +46,14 @@ android {
     }
 
     buildTypes {
+        debug {
+            externalNativeBuild {
+                cmake {
+                    // A separate CMake configuration, so it builds next to the normal one.
+                    if (capiTestAsan.get()) arguments += "-DFFKX_ASAN=ON"
+                }
+            }
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
@@ -170,6 +183,7 @@ tasks.withType<AbstractPublishToMaven>().configureEach {
  * Runs the C ABI test program (src/main/cpp/test/capi_test.c) on the device adb picks (set ANDROID_SERIAL
  * to choose), next to the libraries it was linked with, against the androidTest media samples. Uses the
  * device's primary ABI, or `-PcapiTestAbi=armeabi-v7a` for a 32-bit run on a 64-bit device.
+ * `-PcapiTestAsan` runs an AddressSanitizer build of the core and the test program with the NDK's runtime.
  */
 abstract class ConnectedCapiTest @Inject constructor(private val execOperations: ExecOperations) : DefaultTask() {
     @get:Internal
@@ -185,22 +199,38 @@ abstract class ConnectedCapiTest @Inject constructor(private val execOperations:
     @get:Internal
     abstract val abi: Property<String>
 
+    @get:Internal
+    abstract val asan: Property<Boolean>
+
+    @get:Internal
+    abstract val ndk: DirectoryProperty
+
     @TaskAction
     fun run() {
         val abi = abi.orNull ?: adb("shell", "getprop", "ro.product.cpu.abi").output.trim()
+        val name = if (asan.get()) "ffkx_capi_test-asan" else "ffkx_capi_test"
         val program = nativeOutputs.get().asFile.walk()
-            .filter { it.name == "ffkx_capi_test" && it.parentFile.name == abi }
+            .filter { it.name == name && it.parentFile.name == abi }
             .maxByOrNull { it.lastModified() }
-            ?: throw GradleException("No ffkx_capi_test built for $abi")
-        val files = program.parentFile.listFiles { file -> file.name.endsWith(".so") }!!.map { it.path } + program.path
+            ?: throw GradleException("No $name built for $abi")
+        val files = program.parentFile.listFiles { file -> file.name.endsWith(".so") }!!.map { it.path } +
+            program.path + listOfNotNull(if (asan.get()) asanRuntime(abi).path else null)
         val dir = "/data/local/tmp/ffkx-capi-test"
         adb("shell", "rm -rf $dir && mkdir -p $dir/media $dir/scratch").check()
         adb("push", *files.toTypedArray(), "$dir/").check()
         adb("push", *media.get().asFile.listFiles()!!.map { it.path }.toTypedArray(), "$dir/media/").check()
-        val run = adb("shell", "cd $dir && chmod 755 ffkx_capi_test && LD_LIBRARY_PATH=. ./ffkx_capi_test media scratch")
+        val run = adb("shell", "cd $dir && chmod 755 $name && LD_LIBRARY_PATH=. ./$name media scratch")
         logger.lifecycle("${program.path} on $abi:\n${run.output}")
-        if (run.exitValue != 0) throw GradleException("ffkx_capi_test failed on $abi (exit ${run.exitValue}); files kept in $dir")
+        if (run.exitValue != 0) throw GradleException("$name failed on $abi (exit ${run.exitValue}); files kept in $dir")
         adb("shell", "rm -rf $dir").check()
+    }
+
+    /** The NDK's AddressSanitizer runtime for [abi], e.g. libclang_rt.asan-x86_64-android.so. */
+    private fun asanRuntime(abi: String): File {
+        val arch = mapOf("arm64-v8a" to "aarch64", "armeabi-v7a" to "arm", "x86_64" to "x86_64").getValue(abi)
+        return ndk.get().asFile.resolve("toolchains/llvm/prebuilt").walk()
+            .firstOrNull { it.name == "libclang_rt.asan-$arch-android.so" }
+            ?: throw GradleException("No ASan runtime for $abi in ${ndk.get()}")
     }
 
     private class Result(val command: String, val exitValue: Int, val output: String) {
@@ -229,4 +259,6 @@ tasks.register<ConnectedCapiTest>("connectedCapiTest") {
     nativeOutputs.set(layout.buildDirectory.dir("intermediates/cxx/Debug"))
     media.set(layout.projectDirectory.dir("src/androidTest/assets/media"))
     abi.set(providers.gradleProperty("capiTestAbi"))
+    asan.set(capiTestAsan)
+    ndk.set(androidComponents.sdkComponents.ndkDirectory)
 }

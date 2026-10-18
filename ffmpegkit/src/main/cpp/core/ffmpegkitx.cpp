@@ -3,6 +3,7 @@
 #include "ffmpegkitx.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstring>
@@ -34,6 +35,8 @@ struct ffkx_task {
         : impl(options.log_level, options.max_log_entries, options.read_timeout_us, options.max_buffered_bytes) {}
 
     remux::Task impl;
+    std::atomic<int32_t> references{1};
+    std::atomic<bool> busy{false};  // an operation runs with this task
 };
 
 struct ffkx_log {
@@ -68,6 +71,7 @@ constexpr size_t kSegmentSize = FIRST_VERSION_SIZE(ffkx_segment, end_us);
 constexpr size_t kProbeOptionsSize = FIRST_VERSION_SIZE(ffkx_probe_options, input_path);
 constexpr size_t kFormatInfoSize = FIRST_VERSION_SIZE(ffkx_format_info, format_name);
 constexpr size_t kStreamInfoSize = FIRST_VERSION_SIZE(ffkx_stream_info, channel_layout);
+constexpr size_t kEngineLogSinkSize = FIRST_VERSION_SIZE(ffkx_engine_log_sink, release);
 #undef FIRST_VERSION_SIZE
 
 // No version of any struct gets near this; a larger struct_size is garbage, not a newer header.
@@ -201,16 +205,55 @@ ffkx_status Guard(ffkx_error* error, Body&& body) {
     }
 }
 
+// Claims a task for one operation, unless another operation has it; a null task is always claimed.
+class TaskClaim {
+public:
+    explicit TaskClaim(ffkx_task* task)
+        : task_(task), claimed_(task == nullptr || !task->busy.exchange(true, std::memory_order_acquire)) {}
+
+    ~TaskClaim() {
+        if (task_ != nullptr && claimed_) task_->busy.store(false, std::memory_order_release);
+    }
+
+    TaskClaim(const TaskClaim&) = delete;
+    TaskClaim& operator=(const TaskClaim&) = delete;
+
+    bool claimed() const { return claimed_; }
+
+private:
+    ffkx_task* const task_;
+    const bool claimed_;
+};
+
+const Invalid kTaskBusy{FFKX_ERROR_INVALID_ARGUMENT, "task is running another operation"};
+const Invalid kInEngineSink{FFKX_ERROR_INVALID_ARGUMENT, "operation started from an engine log callback"};
+
 // The task an operation reports to, and its log scope: a scratch task when the caller passed none,
-// whose FFmpeg lines are engine logs.
+// whose FFmpeg lines are engine logs. Check refusal() before running anything. The claim is declared
+// before the log scope, so it ends after the scope has flushed the operation's last line into the
+// task's log: the next operation's log never gets it.
 class OperationTask {
 public:
     explicit OperationTask(ffkx_task* task)
-        : task_(task != nullptr ? &task->impl : &scratch_), logs_(task != nullptr ? &task->impl.log : nullptr) {}
+        : in_sink_(remux::InEngineSink()),
+          claim_(in_sink_ ? nullptr : task),
+          task_(task != nullptr ? &task->impl : &scratch_),
+          logs_(task != nullptr && !in_sink_ && claim_.claimed() ? &task->impl.log : nullptr) {}
+
+    OperationTask(const OperationTask&) = delete;
+    OperationTask& operator=(const OperationTask&) = delete;
+
+    // Why the operation must not run, or null.
+    const Invalid* refusal() const {
+        if (in_sink_) return &kInEngineSink;
+        return claim_.claimed() ? nullptr : &kTaskBusy;
+    }
 
     remux::Task* get() { return task_; }
 
 private:
+    const bool in_sink_;
+    TaskClaim claim_;
     remux::Task scratch_;
     remux::Task* const task_;
     remux::LogScope logs_;
@@ -335,8 +378,14 @@ ffkx_status ffkx_task_create(const ffkx_task_options* options, ffkx_task** task)
     }
 }
 
-void ffkx_task_destroy(ffkx_task* task) {
-    delete task;
+ffkx_task* ffkx_task_retain(ffkx_task* task) {
+    if (task != nullptr) task->references.fetch_add(1, std::memory_order_relaxed);
+    return task;
+}
+
+void ffkx_task_release(ffkx_task* task) {
+    // acq_rel: everything other holders did with the task happens before the delete.
+    if (task != nullptr && task->references.fetch_sub(1, std::memory_order_acq_rel) == 1) delete task;
 }
 
 void ffkx_task_cancel(ffkx_task* task) {
@@ -403,6 +452,26 @@ void ffkx_log_free(ffkx_log* log) {
     delete log;
 }
 
+ffkx_status ffkx_set_engine_log_sink(const ffkx_engine_log_sink* sink) {
+    if (sink == nullptr) {
+        remux::SetEngineSink(nullptr);
+        return FFKX_OK;
+    }
+    ffkx_engine_log_sink values;
+    const ffkx_status status = ReadStruct(sink, kEngineLogSinkSize, &values);
+    if (status != FFKX_OK) return status;
+    if (values.callback == nullptr) return FFKX_ERROR_INVALID_ARGUMENT;
+    std::shared_ptr<remux::EngineSink> next;
+    try {
+        next = std::make_shared<remux::EngineSink>(values.level, values.callback, values.user_data, values.release);
+    } catch (const std::bad_alloc&) {
+        // Not installed, so its release must not run: the caller keeps ownership.
+        return FFKX_ERROR_OUT_OF_MEMORY;
+    }
+    remux::SetEngineSink(std::move(next));
+    return FFKX_OK;
+}
+
 // ---- Operations ----------------------------------------------------------------------------------
 
 ffkx_status ffkx_trim(const ffkx_trim_options* options, ffkx_task* task, ffkx_trim_result* result, ffkx_error* error) {
@@ -432,6 +501,7 @@ ffkx_status ffkx_trim(const ffkx_trim_options* options, ffkx_task* task, ffkx_tr
         request.edit_list = (values.flags & FFKX_TRIM_EDIT_LIST) != 0;
 
         OperationTask operation(task);
+        if (const Invalid* refusal = operation.refusal()) return Report(error, *refusal);
         ffkx_trim_result value{};
         const remux::Status status = remux::Trim(request, operation.get(), &value.actual_start_us, &value.actual_end_us);
         if (!status.failed() && result != nullptr) WriteStruct(value, result);
@@ -474,6 +544,7 @@ ffkx_status ffkx_split(const ffkx_split_options* options, ffkx_task* task, ffkx_
         request.max_segments = values.max_segments == 0 ? FFKX_MAX_SEGMENTS : values.max_segments;
 
         OperationTask operation(task);
+        if (const Invalid* refusal = operation.refusal()) return Report(error, *refusal);
         auto segments = std::make_unique<ffkx_split_result>();
         const remux::Status status = remux::Split(request, operation.get(), &segments->segments);
         if (!status.failed() && result != nullptr) *result = segments.release();
@@ -514,6 +585,7 @@ ffkx_status ffkx_probe(const ffkx_probe_options* options, ffkx_task* task, ffkx_
             return Report(error, invalid);
         }
         OperationTask operation(task);
+        if (const Invalid* refusal = operation.refusal()) return Report(error, *refusal);
         auto media = std::make_unique<ffkx_media_info>();
         const remux::Status status = remux::Probe(source, operation.get(), &media->description);
         if (!status.failed() && info != nullptr) *info = media.release();

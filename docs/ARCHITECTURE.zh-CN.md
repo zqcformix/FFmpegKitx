@@ -49,11 +49,34 @@ Android、Apple、HarmonyOS 共享媒体语义、测试样本和 C ABI，不共�
 - **二进制布局**：`libffmpegkitx_core.so` 是可移植 C++ 核心（`cpp/core/`：remux、trim、split、probe、日志捕获、FdReader），只导出公开头文件 `cpp/include/ffmpegkitx.h` 声明的 `ffkx_*` 函数（链接脚本 `core/exports.map`），静态链接的 C++ 运行时也不导出，所以没有 C++ 类型能越过库边界。Android 的 JNI 库 `libffmpegkit.so`（`cpp/jni/`）依赖它，只做参数与结果转换；例外是 `errors.cpp`（编译 `AVERROR` 常量供 Kotlin 对表）和 `inspect.cpp`（测试用的解码校验），只有这两个文件能看到 FFmpeg 头文件。
 - **头文件约定**：C99；不出现 C++ 类型、异常或 FFmpeg 类型，FFmpeg 错误码只作为诊断用的数字。时间为有符号 64 位微秒，路径为 UTF-8。库分配的对象（`ffkx_task`、`ffkx_log`、`ffkx_split_result`、`ffkx_media_info`）都是不透明句柄，各有释放函数；库返回的字符串在所属对象释放前有效。
 - **版本化结构**：每个结构的第一个字段是 `struct_size`，调用方先清零再设置。传入的结构可以比库认识的短（旧头文件编译，缺少的字段按 0 处理），也可以更长（新头文件编译，库不认识的字节必须全为 0，否则报 `FFKX_ERROR_UNSUPPORTED_VERSION`）；未知的 flag 位同样报这个错误。库填写的结构按调用方的 `struct_size` 填写，库不认识的部分清零。
-- **版本号**：`ffkx_abi_version()` 与 `FFKX_ABI_VERSION_MAJOR/MINOR`，当前 0.1。0.x 期间头文件只随平台包内部分发，次版本可以做不兼容修改，但必须同步修改布局固定测试，兼容判断要求次版本完全相同。第二个平台绑定实际用过、或头文件单独分发时冻结为 1.0，之后只能追加：新字段从旧 `sizeof` 之后开始，值为 0 时保持旧行为。
+- **版本号**：`ffkx_abi_version()` 与 `FFKX_ABI_VERSION_MAJOR/MINOR`，当前 0.2（6.2 用引用计数取代了 `ffkx_task_destroy`）。0.x 期间头文件只随平台包内部分发，次版本可以做不兼容修改，但必须同步修改布局固定测试，兼容判断要求次版本完全相同。第二个平台绑定实际用过、或头文件单独分发时冻结为 1.0，之后只能追加：新字段从旧 `sizeof` 之后开始，值为 0 时保持旧行为。
 - **状态码**：`FFKX_OK` 与 15 个 `FFKX_ERROR_*`，数值永不改变。FFmpeg 错误码到状态的映射在核心里（`remux::StatusOf`），与 Kotlin 的 `AvError.reasonOf` 是同一张表，设备测试核对两者一致。`ffkx_error` 包含状态、`AVERROR`、出错的一侧，以及不含路径的消息；平台绑定在消息后补上路径或 Uri 描述。
-- **线程**（6.2 细化）：操作阻塞调用线程，不回调。同一任务同一时刻只服务一个操作；执行期间其他线程可以取消、读进度、取日志。任务要等最后一个操作返回后才能销毁。
+- **线程与生命周期**：见 2.2。
 - **仍在平台层的部分**：输出事务（临时文件、不覆盖发布、失败回滚）、排队与会话状态、进度回调节奏、日志路径脱敏。Android 上由 Kotlin 实现；其他平台接入前再评估是否下沉到核心。
 - **验证**：`ffkx_capi_test`（C11，只用公开头文件）每次构建都会编译，其中的 `_Static_assert` 固定各 ABI 的结构布局与常量；`gradlew :ffmpegkit:connectedCapiTest` 把它推到设备上运行。头文件另按 `-std=c99` 与 `-std=c++11` 加 `-pedantic-errors -Werror` 编译。
+
+### 2.2 线程、回调与生命周期（路线图 6.2）
+
+完整规则写在头文件开头的 "Threads and lifetimes" 一节和 `ffkx_set_engine_log_sink` 的注释里，这里记录设计取舍。
+
+- **任务状态由调用方拉取，库不推送**：进度、日志和取消标记都由调用方从任意线程读取或设置，例如进度靠定时调用 `ffkx_task_progress`，与 Android 现有的 100 ms 轮询一致。库不提供按任务的回调，所以任务回调不可能比任务活得更久，取消、释放与回调之间也就不存在竞争。Swift 的 `AsyncStream`、ArkTS 的订阅都在平台层用轮询实现；Node-API 不需要跨线程回调 JS。
+- **唯一的回调是引擎日志 sink**：鸿蒙看不到 stderr，Apple 平台要接 os_log，所以不在任务中的 FFmpeg 日志可以交给调用方的回调，默认仍写到 logcat 或 stderr。
+  - 回调在 FFmpeg 写日志的线程上运行，可能多个线程同时调用，同一线程的行保持顺序。
+  - 回调和 release 里不能调用 FFmpeg：在那里产生的日志行会被丢弃，因为线程局部的标记会挡住重入。在那里启动的操作会以 `FFKX_ERROR_INVALID_ARGUMENT` 失败。可以在回调里更换 sink；多个线程同时更换时，由一把锁保证级别过滤与生效的 sink 一致。
+  - 更换 sink 时不等待正在回调的线程。每一行日志在回调期间持有 sink 的 `shared_ptr` 快照，所以旧 sink 的 `release(user_data)` 恰好调用一次，在最后一次回调返回之后执行，在最后放手的那个线程上（没有线程在用时，就在更换 sink 的调用里执行）。安装失败时不调用 release。进程退出时不调用 release，这样不会在平台运行时已经拆除之后再回调进去。
+- **任务引用计数**：`ffkx_task_create` 返回一个引用，`ffkx_task_retain` 增加一个，`ffkx_task_release` 减少一个，最后一个引用释放时任务被销毁。使用任务的每个线程都要持有自己的引用。这样一来，一个线程取消、另一个线程释放、操作所在的线程仍在执行，三者可以按任意顺序发生。释放不会取消任务：不再需要结果时，先取消再释放。
+- **禁止重入**：同一任务同时只能执行一个操作，第二个会以 `FFKX_ERROR_INVALID_ARGUMENT`（"task is running another operation"）失败，不会去碰第一个操作的状态。
+- **结果对象**（`ffkx_log`、`ffkx_split_result`、`ffkx_media_info`）创建后不再改变，可以由多个线程同时读取。调用方在所有读取结束后释放一次，其中的字符串随之失效。
+- **库创建的线程**：每个从描述符读取的输入各有一个 `FdReader` 辅助线程，输入关闭时结束；读取被放弃时，等那次读取返回后结束。辅助线程不回调。由于这些线程和 FFmpeg 的全局日志回调，库加载后不能卸载，直到进程结束。
+- **验证**：`ffkx_capi_test` 覆盖以下情形：
+  - 引用计数；
+  - 操作执行中由另一线程释放引用；
+  - 忙碌任务上的第二个操作；
+  - 40 轮"操作 + 取消线程 + 释放线程"的竞争；
+  - sink 的投递、级别过滤、拒绝安装、在回调中更换 sink；
+  - 4 个线程持续写日志的同时更换 400 个 sink：每个 sink 恰好释放一次，从不在回调期间释放，释放后也没有回调。
+
+  `connectedCapiTest -PcapiTestAsan` 用 AddressSanitizer 构建核心和测试程序后运行。没有用 HWASan：在量产的 Android 14 设备上，预编译的 FFmpeg 经系统分配器申请的内存带着系统的指针标签（0xb4），对它的每次写入都会被误报。
 
 ## 3. 基础操作的契约
 
@@ -90,7 +113,7 @@ Android、Apple、HarmonyOS 共享媒体语义、测试样本和 C ABI，不共�
 
 进度模型至少包含已处理的媒体时间、可选的目标时长、写入字节和终态。总量未知时显示不定进度；trim、concat、变速等操作按目标时间轴计算。ffmpeg.wasm 的官方类文档也提醒，其进度只在输入与输出时长相同时准确，不能把输入百分比直接套用到所有编辑场景。
 
-取消使用原子标记与 FFmpeg 的 I/O interrupt callback，覆盖包循环、队列、网络读取和写出过程。回调必须声明所在线程、重入规则和销毁时机。native 回调不能直接更新 UI；Android、Swift、ArkTS 各自转移到合适的执行上下文。
+取消使用原子标记与 FFmpeg 的 I/O interrupt callback，覆盖包循环、队列、网络读取和写出过程。回调必须声明所在线程、重入规则和销毁时机；C ABI 的做法见 2.2：任务状态由调用方拉取，唯一的回调是引擎日志 sink。native 回调不能直接更新 UI；Android、Swift、ArkTS 各自转移到合适的执行上下文。
 
 ## 5. 平台 API 设计
 
