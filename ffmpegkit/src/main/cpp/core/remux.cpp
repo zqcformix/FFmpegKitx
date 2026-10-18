@@ -3,8 +3,6 @@
 #include <cerrno>
 #include <unistd.h>
 
-#include "jni_util.h"
-
 namespace remux {
 
 namespace {
@@ -29,36 +27,69 @@ Input::~Input() {
     }
 }
 
-Source ToSource(JNIEnv* env, jbyteArray path, jint fd) {
-    Source source;
-    if (path != nullptr) source.path = ToUtf8Path(env, path);
-    source.fd = fd;
-    return source;
-}
-
-Task* FromHandle(jlong handle, Task* scratch) {
-    return handle == 0 ? scratch : reinterpret_cast<Task*>(handle);
-}
-
-LogBuffer* LogOf(jlong handle) {
-    return handle == 0 ? nullptr : &reinterpret_cast<Task*>(handle)->log;
-}
-
 Status Cancelled() {
-    return Failure(AVERROR_EXIT, false, "cancelled");
+    return Rejected(FFKX_ERROR_CANCELLED, false, "cancelled", AVERROR_EXIT);
 }
 
-Status Failure(int code, bool output_side, std::string detail) {
-    Status s;
-    s.code = code;
-    s.output_side = output_side;
-    s.detail = std::move(detail);
+// The same table as AvError.reasonOf in the Android facade (ErrorMapping.kt); PackagedErrorsTest checks
+// that they agree.
+ffkx_status StatusOf(int code, bool output_side) {
+    switch (code) {
+        case 0:
+            return FFKX_OK;
+        case AVERROR_EXIT:
+            return FFKX_ERROR_CANCELLED;
+        case AVERROR(ENOMEM):
+            return FFKX_ERROR_OUT_OF_MEMORY;
+        case AVERROR(ENOENT):
+            return output_side ? FFKX_ERROR_IO : FFKX_ERROR_INPUT_NOT_FOUND;
+        case AVERROR(EACCES):
+        case AVERROR(EPERM):
+        case AVERROR(EROFS):
+            return FFKX_ERROR_ACCESS_DENIED;
+        case AVERROR(EEXIST):
+            return FFKX_ERROR_OUTPUT_EXISTS;
+        case AVERROR(ENOSPC):
+        case AVERROR(EDQUOT):
+            return FFKX_ERROR_INSUFFICIENT_SPACE;
+        case AVERROR(EIO):
+        case AVERROR(ETIMEDOUT):
+            return FFKX_ERROR_IO;
+        // EOF only fails an operation when the media ended before the data it needed.
+        case AVERROR_INVALIDDATA:
+        case AVERROR_EOF:
+            return FFKX_ERROR_INVALID_MEDIA;
+        case AVERROR(ENOSYS):
+        case AVERROR_PATCHWELCOME:
+        case AVERROR_DEMUXER_NOT_FOUND:
+        case AVERROR_MUXER_NOT_FOUND:
+        case AVERROR_DECODER_NOT_FOUND:
+        case AVERROR_ENCODER_NOT_FOUND:
+        case AVERROR_STREAM_NOT_FOUND:
+        case AVERROR_PROTOCOL_NOT_FOUND:
+        case AVERROR_BSF_NOT_FOUND:
+        case AVERROR_FILTER_NOT_FOUND:
+            return FFKX_ERROR_UNSUPPORTED_MEDIA;
+        default:
+            return FFKX_ERROR_FFMPEG;
+    }
+}
+
+Status Failure(int code, bool output_side, const std::string& action) {
+    char text[AV_ERROR_MAX_STRING_SIZE];
+    av_strerror(code, text, sizeof(text));
+    Status s = Rejected(StatusOf(code, output_side), output_side,
+                        action + " failed: " + text + " (" + std::to_string(code) + ")", code);
+    if (code == 0) s.status = FFKX_ERROR_INTERNAL;  // a failure must not read as success
     return s;
 }
 
-Status Rejected(int reason, bool output_side, std::string detail, int code) {
-    Status s = Failure(code, output_side, std::move(detail));
-    s.reason = reason;
+Status Rejected(ffkx_status status, bool output_side, std::string message, int code) {
+    Status s;
+    s.status = status;
+    s.code = code;
+    s.output_side = output_side;
+    s.message = std::move(message);
     return s;
 }
 
@@ -86,7 +117,7 @@ Status OpenFormat(const Source& source, Task* task, Input* input) {
         // Pipes and some provider streams cannot seek; M1 needs seeking (keyframe search, MP4 index).
         if (lseek(source.fd, 0, SEEK_SET) < 0) {
             const int error = AVERROR(errno);
-            return Rejected(kReasonUnsupportedMedia, false, "input cannot seek (pipe or stream)", error);
+            return Rejected(FFKX_ERROR_UNSUPPORTED_MEDIA, false, "input cannot seek (pipe or stream)", error);
         }
         input->reader = FdReader::Open(source.fd, task);
         if (input->reader == nullptr) return Failure(AVERROR(errno), false, "start reading the input descriptor");
@@ -126,7 +157,7 @@ Status OpenInput(const Source& source, Task* task, Input* input) {
         const AVMediaType type = st->codecpar->codec_type;
         if (st->disposition & AV_DISPOSITION_ATTACHED_PIC) continue;  // cover art
         if (type == AVMEDIA_TYPE_VIDEO) {
-            if (input->has_video) return Rejected(kReasonUnsupportedMedia, false, "more than one video stream");
+            if (input->has_video) return Rejected(FFKX_ERROR_UNSUPPORTED_MEDIA, false, "more than one video stream");
             input->has_video = true;
             input->tracks[i].video = true;
             input->reference_stream = static_cast<int>(i);
@@ -137,7 +168,7 @@ Status OpenInput(const Source& source, Task* task, Input* input) {
         }
         input->tracks[i].output_index = selected++;
     }
-    if (selected == 0) return Rejected(kReasonUnsupportedMedia, false, "no audio or video stream");
+    if (selected == 0) return Rejected(FFKX_ERROR_UNSUPPORTED_MEDIA, false, "no audio or video stream");
     return {};
 }
 
@@ -145,7 +176,7 @@ Status OpenOutput(const Input& input, const std::string& path, Task* task, Outpu
     if (task->IsCancelled()) return Cancelled();
     int ret = avformat_alloc_output_context2(&output->ctx, nullptr, nullptr, path.c_str());
     if (ret < 0 || output->ctx == nullptr) {
-        return Rejected(kReasonUnsupportedMedia, true, "no container matches the output file extension", ret);
+        return Rejected(FFKX_ERROR_UNSUPPORTED_MEDIA, true, "no container matches the output file extension", ret);
     }
     AVFormatContext* out = output->ctx;
     out->interrupt_callback = InterruptCallback(task);
@@ -156,7 +187,7 @@ Status OpenOutput(const Input& input, const std::string& path, Task* task, Outpu
         const AVStream* ist = input.ctx->streams[i];
         // 1: supported, 0: not supported, <0: unknown (header writing decides).
         if (avformat_query_codec(out->oformat, ist->codecpar->codec_id, FF_COMPLIANCE_NORMAL) == 0) {
-            return Rejected(kReasonUnsupportedMedia, true,
+            return Rejected(FFKX_ERROR_UNSUPPORTED_MEDIA, true,
                             std::string(avcodec_get_name(ist->codecpar->codec_id)) + " cannot be stored in " +
                                 out->oformat->name);
         }
@@ -176,7 +207,7 @@ Status OpenOutput(const Input& input, const std::string& path, Task* task, Outpu
     }
     ret = avformat_write_header(out, nullptr);
     if (ret == AVERROR(EINVAL) || ret == AVERROR(ENOSYS) || ret == AVERROR_PATCHWELCOME) {
-        return Rejected(kReasonUnsupportedMedia, true, std::string(out->oformat->name) + " cannot store these streams", ret);
+        return Rejected(FFKX_ERROR_UNSUPPORTED_MEDIA, true, std::string(out->oformat->name) + " cannot store these streams", ret);
     }
     if (ret < 0) return Failure(ret, true, "write output header");
     output->CountBytes();
@@ -210,57 +241,4 @@ int WritePacket(const Input& input, Output* output, AVPacket* packet, int64_t an
     return ret;
 }
 
-jobject ToJava(JNIEnv* env, const Status& status, const std::vector<int64_t>& times_us) {
-    jclass result_class = env->FindClass("io/github/nova/ffmpegkit/NativeRemuxStatus");
-    if (result_class == nullptr) return nullptr;
-    jmethodID constructor = env->GetMethodID(result_class, "<init>", "(IZILjava/lang/String;[J)V");
-    if (constructor == nullptr) return nullptr;
-    jstring detail = status.detail.empty() ? nullptr : env->NewStringUTF(status.detail.c_str());
-    jlongArray times = env->NewLongArray(static_cast<jsize>(times_us.size()));
-    if (times == nullptr) return nullptr;
-    env->SetLongArrayRegion(times, 0, static_cast<jsize>(times_us.size()),
-                            reinterpret_cast<const jlong*>(times_us.data()));
-    return env->NewObject(result_class, constructor, status.code, status.output_side, status.reason, detail, times);
-}
-
 }  // namespace remux
-
-extern "C" JNIEXPORT jlong JNICALL
-Java_io_github_nova_ffmpegkit_NativeTask_create(JNIEnv* /* env */, jclass /* clazz */, jint log_level,
-                                                jint max_log_entries, jlong read_timeout_us,
-                                                jlong max_buffered_bytes) {
-    return reinterpret_cast<jlong>(new remux::Task(log_level, max_log_entries, read_timeout_us, max_buffered_bytes));
-}
-
-extern "C" JNIEXPORT jobject JNICALL
-Java_io_github_nova_ffmpegkit_NativeTask_log(JNIEnv* env, jclass /* clazz */, jlong handle) {
-    return remux::LogToJava(env, reinterpret_cast<const remux::Task*>(handle)->log);
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_io_github_nova_ffmpegkit_NativeTask_cancel(JNIEnv* /* env */, jclass /* clazz */, jlong handle) {
-    reinterpret_cast<remux::Task*>(handle)->cancelled.store(true, std::memory_order_relaxed);
-}
-
-// Fills `out` (length 4, laid out as NativeTask.progress reads it): processed_us, duration_us, bytes_written, segment.
-extern "C" JNIEXPORT void JNICALL
-Java_io_github_nova_ffmpegkit_NativeTask_progress(JNIEnv* env, jclass /* clazz */, jlong handle, jlongArray out) {
-    const auto* task = reinterpret_cast<const remux::Task*>(handle);
-    const jlong values[] = {
-        task->processed_us.load(std::memory_order_relaxed),
-        task->duration_us.load(std::memory_order_relaxed),
-        task->bytes_written.load(std::memory_order_relaxed),
-        task->segment.load(std::memory_order_relaxed),
-    };
-    env->SetLongArrayRegion(out, 0, 4, values);
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_io_github_nova_ffmpegkit_NativeTask_setSegment(JNIEnv* /* env */, jclass /* clazz */, jlong handle, jint segment) {
-    reinterpret_cast<remux::Task*>(handle)->segment.store(segment, std::memory_order_relaxed);
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_io_github_nova_ffmpegkit_NativeTask_destroy(JNIEnv* /* env */, jclass /* clazz */, jlong handle) {
-    delete reinterpret_cast<remux::Task*>(handle);
-}

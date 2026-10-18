@@ -90,7 +90,8 @@ int FdReader::ReadAt(uint8_t* buffer, int size) {
     shared_->changed.notify_all();
 
     const int64_t timeout_us = task_->read_timeout_us.load(std::memory_order_relaxed);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(timeout_us);
+    // Elapsed time, not a deadline: now() + a timeout of centuries would overflow into the past.
+    const auto start = std::chrono::steady_clock::now();
     while (!shared_->answered) {
         shared_->changed.wait_for(lock, kPollInterval);
         if (shared_->answered) break;
@@ -98,7 +99,8 @@ int FdReader::ReadAt(uint8_t* buffer, int size) {
             abandoned_ = AVERROR_EXIT;
             return abandoned_;
         }
-        if (timeout_us > 0 && std::chrono::steady_clock::now() >= deadline) {
+        const auto elapsed = std::chrono::steady_clock::now() - start;
+        if (timeout_us > 0 && std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count() >= timeout_us) {
             abandoned_ = AVERROR(ETIMEDOUT);
             return abandoned_;
         }

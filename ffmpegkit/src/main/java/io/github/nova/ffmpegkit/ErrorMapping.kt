@@ -62,7 +62,9 @@ internal object AvError {
 
     /**
      * Generic meaning of [code]. Callers that know more (for example, that an `EINVAL` came from
-     * choosing an output container) should pick the reason themselves.
+     * choosing an output container) should pick the reason themselves. Native failures arrive already
+     * classified by the core's copy of this table (`remux::StatusOf`); `PackagedErrorsTest` checks that
+     * the two agree.
      */
     fun reasonOf(code: Int, role: MediaRole): Reason = when (code) {
         ENOENT -> if (role == MediaRole.INPUT) Reason.INPUT_NOT_FOUND else Reason.IO
@@ -96,6 +98,14 @@ internal object NativeErrors {
     /** The `AVERROR` values behind [AvError.all], compiled from the FFmpeg headers. */
     @JvmStatic
     external fun constants(): IntArray
+
+    /** The `FFKX_*` status values behind [NativeStatus.all], compiled from include/ffmpegkitx.h. */
+    @JvmStatic
+    external fun statuses(): IntArray
+
+    /** The `FFKX_*` status the core reports for FFmpeg error [code] on one side. */
+    @JvmStatic
+    external fun statusOf(code: Int, outputSide: Boolean): Int
 }
 
 /**

@@ -1,5 +1,4 @@
 // Keyframe-aligned single-pass split. See docs/ANDROID_API.zh-CN.md §4 for the contract.
-#include <jni.h>
 #include <algorithm>
 #include <cerrno>
 #include <climits>
@@ -7,8 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "jni_util.h"
-#include "remux.h"
+#include "operations.h"
 
 namespace {
 
@@ -24,13 +22,13 @@ using remux::ToMicros;
 // are therefore never shorter than that, except the last.
 class Splitter {
 public:
-    Splitter(remux::Source input, std::string directory, std::string extension, int64_t segment_us, int max_segments,
-             remux::Task* task)
-        : input_(std::move(input)),
-          directory_(std::move(directory)),
-          extension_(std::move(extension)),
-          segment_us_(segment_us),
-          max_segments_(max_segments),
+    Splitter(const remux::SplitRequest& request, remux::Task* task)
+        : input_(request.input),
+          directory_(request.directory),
+          prefix_(request.prefix),
+          extension_(request.extension),
+          segment_us_(request.segment_us),
+          max_segments_(request.max_segments),
           task_(task),
           progress_(task) {}
 
@@ -39,7 +37,7 @@ public:
         if (s.failed()) return s;
         if (in_.ctx->duration != AV_NOPTS_VALUE && in_.ctx->duration > 0 &&
             in_.ctx->duration / segment_us_ + 1 > max_segments_) {
-            return Rejected(remux::kReasonTooManySegments, false, TooManySegments());
+            return Rejected(FFKX_ERROR_TOO_MANY_SEGMENTS, false, TooManySegments());
         }
 
         Packet packet(av_packet_alloc());
@@ -54,20 +52,19 @@ public:
         }
         if (task_->IsCancelled() || ret == AVERROR_EXIT) return remux::Cancelled();
         if (ret != AVERROR_EOF) return Failure(ret, false, "read input");
-        if (starts_abs_.empty()) return Rejected(remux::kReasonRangeOutsideMedia, false, "the input has no packets");
+        if (starts_abs_.empty()) return Rejected(FFKX_ERROR_RANGE_OUTSIDE_MEDIA, false, "the input has no packets");
         return remux::CloseOutput(&out_);
     }
 
     // [start, end) of each segment in microseconds from the input's start time.
-    std::vector<int64_t> Times() const {
-        std::vector<int64_t> times;
+    std::vector<remux::Segment> Segments() const {
+        std::vector<remux::Segment> segments;
         for (size_t i = 0; i < starts_abs_.size(); ++i) {
             const int64_t start = std::max<int64_t>(0, starts_abs_[i] - in_.origin);
             const int64_t end = i + 1 < starts_abs_.size() ? starts_abs_[i + 1] - in_.origin : last_end_abs_ - in_.origin;
-            times.push_back(start);
-            times.push_back(std::max(end, start + 1));
+            segments.push_back({start, std::max(end, start + 1)});
         }
-        return times;
+        return segments;
     }
 
 private:
@@ -96,12 +93,12 @@ private:
         if (packet->stream_index != in_.reference_stream || packet->pts == AV_NOPTS_VALUE) return false;
         if (in_.has_video && !(packet->flags & AV_PKT_FLAG_KEY)) return false;
         const AVStream* st = in_.ctx->streams[packet->stream_index];
-        return ToMicros(packet->pts, st->time_base) >= starts_abs_.back() + segment_us_;
+        return ToMicros(packet->pts, st->time_base) >= remux::SaturatingAdd(starts_abs_.back(), segment_us_);
     }
 
     Status StartSegment(int64_t anchor_pts, AVRational anchor_time_base, int64_t start_abs) {
         const int index = static_cast<int>(starts_abs_.size()) + 1;
-        if (index > max_segments_) return Rejected(remux::kReasonTooManySegments, false, TooManySegments());
+        if (index > max_segments_) return Rejected(FFKX_ERROR_TOO_MANY_SEGMENTS, false, TooManySegments());
         Status s = remux::OpenOutput(in_, SegmentPath(index), task_, &out_);
         if (s.failed()) return s;
         anchor_pts_ = anchor_pts;
@@ -114,7 +111,7 @@ private:
     std::string SegmentPath(int index) const {
         char number[16];
         snprintf(number, sizeof(number), "%04d", index);
-        return directory_ + "/" + number + "." + extension_;
+        return directory_ + "/" + prefix_ + number + "." + extension_;
     }
 
     std::string TooManySegments() const {
@@ -123,6 +120,7 @@ private:
 
     const remux::Source input_;
     const std::string directory_;
+    const std::string prefix_;
     const std::string extension_;
     const int64_t segment_us_;
     const int max_segments_;
@@ -139,24 +137,13 @@ private:
 
 }  // namespace
 
-// Reads from `input_path` (UTF-8 bytes) or, when `input_fd` >= 0, from that descriptor, and writes
-// segments 0001.<extension>, 0002.<extension>… into `directory`. Returns a NativeRemuxStatus whose
-// times are [start, end) pairs, one per segment.
-extern "C" JNIEXPORT jobject JNICALL
-Java_io_github_nova_ffmpegkit_NativeSplit_split(
-        JNIEnv* env,
-        jobject /* this */,
-        jbyteArray input_path,
-        jint input_fd,
-        jbyteArray directory,
-        jbyteArray extension,
-        jlong segment_us,
-        jint max_segments,
-        jlong task) {
-    remux::LogScope logs(remux::LogOf(task));
-    remux::Task scratch;
-    Splitter splitter(remux::ToSource(env, input_path, input_fd), ToUtf8Path(env, directory), ToUtf8Path(env, extension),
-                      segment_us, max_segments, remux::FromHandle(task, &scratch));
+namespace remux {
+
+Status Split(const SplitRequest& request, Task* task, std::vector<Segment>* segments) {
+    Splitter splitter(request, task);
     const Status status = splitter.Run();
-    return remux::ToJava(env, status, status.failed() ? std::vector<int64_t>{} : splitter.Times());
+    if (!status.failed()) *segments = splitter.Segments();
+    return status;
 }
+
+}  // namespace remux

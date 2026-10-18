@@ -52,7 +52,7 @@ internal object Trimmer {
             opened.fd,
             temp.path.toByteArray(),
             range.startMicros,
-            range.endExclusiveMicros ?: -1,
+            range.endExclusiveMicros ?: NativeTrim.END_OF_MEDIA,
             editList,
             task?.nativeHandle ?: 0L,
         )
@@ -67,9 +67,12 @@ internal object NativeTrim {
         System.loadLibrary("ffmpegkit")
     }
 
+    /** FFKX_TIME_END: trims to the end of the media. */
+    const val END_OF_MEDIA = Long.MAX_VALUE
+
     /**
-     * Reads [inputPath] (UTF-8 bytes) or, when [inputFd] >= 0, that descriptor. [endUs] is -1 to trim
-     * to the end of the media; [editList] selects [TrimMode.EDIT_LIST]; [task] is a
+     * Reads [inputPath] (UTF-8 bytes) or, when it is null, the descriptor [inputFd]. [endUs] is
+     * [END_OF_MEDIA] to trim to the end of the media; [editList] selects [TrimMode.EDIT_LIST]; [task] is a
      * [NativeTask] handle or 0 and receives the progress. Times: [actual start, end).
      */
     @JvmStatic

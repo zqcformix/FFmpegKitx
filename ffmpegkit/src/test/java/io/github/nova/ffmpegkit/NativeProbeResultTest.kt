@@ -9,7 +9,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Parsing of the probe.cpp result layout; device tests check the values against ffprobe. */
+/** Parsing of the probe result layout (jni/operations.cpp); device tests check the values against ffprobe. */
 class NativeProbeResultTest {
 
     @Test
@@ -50,7 +50,7 @@ class NativeProbeResultTest {
         val info = result(
             header(startUs = UNKNOWN, durationUs = UNKNOWN, bitRate = UNKNOWN),
             listOf(
-                video(durationUs = UNKNOWN, bitRate = UNKNOWN, width = UNKNOWN, height = UNKNOWN, rate = UNKNOWN to UNKNOWN, rotationCcw = UNKNOWN),
+                video(durationUs = UNKNOWN, bitRate = UNKNOWN, width = UNKNOWN, height = UNKNOWN, rate = UNKNOWN to UNKNOWN, rotation = UNKNOWN),
                 audio(durationUs = UNKNOWN, bitRate = UNKNOWN, sampleRate = UNKNOWN, channels = UNKNOWN),
             ),
             listOf("h264", "h264", null, "aac", null),
@@ -66,20 +66,20 @@ class NativeProbeResultTest {
     }
 
     @Test
-    fun rotationIsClockwiseDegreesForDisplay() {
-        // probe.cpp passes FFmpeg's counterclockwise angle (ffprobe's "rotation").
-        val clockwise = listOf(0L, -90L, 90L, 180L, -180L, 270L, -270L, 45L).map { ccw ->
-            val info = result(header(), listOf(video(rotationCcw = ccw)), listOf("mov", "h264", null)).toMediaInfo()
+    fun rotationIsPassedThrough() {
+        // The core already converts FFmpeg's counterclockwise angle to clockwise degrees in 0..359.
+        val rotations = listOf(0L, 90L, 180L, 270L, 315L).map { rotation ->
+            val info = result(header(), listOf(video(rotation = rotation)), listOf("mov", "h264", null)).toMediaInfo()
             (info.streams.single() as StreamInfo.Video).rotation
         }
-        assertEquals(listOf(0, 90, 270, 180, 180, 90, 270, 315), clockwise)
+        assertEquals(listOf(0, 90, 180, 270, 315), rotations)
     }
 
     @Test
     fun otherStreamsAndAttachedPictures() {
         val info = result(
             header(),
-            listOf(video(attachedPicture = true), other(type = 3), other(type = 2), other(type = 4), other(type = -1)),
+            listOf(video(attachedPicture = true), other(type = 3), other(type = 4), other(type = 5), other(type = 0)),
             listOf("matroska,webm", "mjpeg", null, "subrip", null, "bin_data", null, "ttf", null, "none", null),
         ).toMediaInfo()
 
@@ -104,27 +104,27 @@ class NativeProbeResultTest {
 
     private fun result(header: List<Long>, streams: List<List<Long>>, strings: List<String?>) =
         NativeProbeResult(
-            NativeRemuxStatus(0, false, NativeRemuxStatus.REASON_FROM_CODE, null, LongArray(0)),
+            NativeRemuxStatus(NativeStatus.OK, 0, NativeStatus.SIDE_NONE, ByteArray(0), LongArray(0)),
             (header + streams.flatten()).toLongArray(),
             strings.toTypedArray(),
         )
 
     private fun header(startUs: Long = 0, durationUs: Long = UNKNOWN, bitRate: Long = UNKNOWN) = listOf(startUs, durationUs, bitRate)
 
-    // Per-stream layout from probe.cpp: media_type, duration_us, bit_rate, width, height, frame_rate_num,
-    // frame_rate_den, rotation_ccw, attached_picture, sample_rate, channels.
+    // Per-stream layout from jni/operations.cpp: media_type (FFKX_MEDIA_TYPE_*), flags (FFKX_STREAM_*),
+    // duration_us, bit_rate, width, height, frame_rate_num, frame_rate_den, rotation, sample_rate, channels.
     private fun video(
         durationUs: Long = UNKNOWN,
         bitRate: Long = UNKNOWN,
         width: Long = 320,
         height: Long = 240,
         rate: Pair<Long, Long> = 30L to 1L,
-        rotationCcw: Long = 0,
+        rotation: Long = 0,
         attachedPicture: Boolean = false,
-    ) = listOf(0, durationUs, bitRate, width, height, rate.first, rate.second, rotationCcw, if (attachedPicture) 1 else 0, UNKNOWN, UNKNOWN)
+    ) = listOf(1, if (attachedPicture) 1 else 0, durationUs, bitRate, width, height, rate.first, rate.second, rotation, UNKNOWN, UNKNOWN)
 
     private fun audio(durationUs: Long = UNKNOWN, bitRate: Long = UNKNOWN, sampleRate: Long = 48_000, channels: Long = 2) =
-        listOf(1, durationUs, bitRate, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN, 0, sampleRate, channels)
+        listOf(2, 0, durationUs, bitRate, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN, sampleRate, channels)
 
-    private fun other(type: Long) = listOf(type, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN, 0, UNKNOWN, UNKNOWN)
+    private fun other(type: Long) = listOf(type, 0, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN)
 }

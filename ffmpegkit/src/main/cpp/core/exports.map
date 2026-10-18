@@ -1,0 +1,8 @@
+/* libffmpegkitx_core exports the C ABI (include/ffmpegkitx.h) and nothing else: the C++ core and its
+   statically linked C++ runtime stay hidden, so no C++ type can cross the library boundary. */
+{
+  global:
+    ffkx_*;
+  local:
+    *;
+};

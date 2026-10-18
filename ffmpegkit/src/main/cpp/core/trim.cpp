@@ -1,6 +1,4 @@
 // Fast (stream copy) time trimming. See docs/ANDROID_API.zh-CN.md §3 and §7 for the contract.
-#include <jni.h>
-#include <android/log.h>
 #include <algorithm>
 #include <cerrno>
 #include <climits>
@@ -8,10 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "jni_util.h"
-#include "remux.h"
-
-#define TAG "FFmpegKit"
+#include "operations.h"
 
 namespace {
 
@@ -23,13 +18,12 @@ using remux::ToMicros;
 
 class Trimmer {
 public:
-    Trimmer(remux::Source input, std::string output, int64_t start_us, int64_t end_us, bool edit_list,
-            remux::Task* task)
-        : input_(std::move(input)),
-          output_path_(std::move(output)),
-          start_us_(start_us),
-          end_us_(end_us),
-          edit_list_(edit_list),
+    Trimmer(const remux::TrimRequest& request, remux::Task* task)
+        : input_(request.input),
+          output_path_(request.output),
+          start_us_(request.start_us),
+          end_us_(request.end_us),
+          edit_list_(request.edit_list),
           task_(task),
           progress_(task) {}
 
@@ -37,13 +31,13 @@ public:
         Status s = remux::OpenInput(input_, task_, &in_);
         if (s.failed()) return s;
         if (in_.ctx->duration != AV_NOPTS_VALUE && in_.ctx->duration > 0 && start_us_ >= in_.ctx->duration) {
-            return Rejected(remux::kReasonRangeOutsideMedia, false, "start is at or beyond the end of the media");
+            return Rejected(FFKX_ERROR_RANGE_OUTSIDE_MEDIA, false, "start is at or beyond the end of the media");
         }
-        start_abs_ = in_.origin + start_us_;
-        end_abs_ = end_us_ < 0 ? INT64_MAX : in_.origin + end_us_;
+        start_abs_ = remux::SaturatingAdd(in_.origin, start_us_);
+        end_abs_ = remux::SaturatingAdd(in_.origin, end_us_);
 
         if (edit_list_ && !IsMovFamily(output_path_)) {
-            return Rejected(remux::kReasonUnsupportedMedia, true, "edit list mode needs an MP4 or MOV output");
+            return Rejected(FFKX_ERROR_UNSUPPORTED_MEDIA, true, "edit list mode needs an MP4 or MOV output");
         }
         s = remux::OpenOutput(in_, output_path_, task_, &out_);
         if (s.failed()) return s;
@@ -52,7 +46,7 @@ public:
             // Reading from the beginning is also correct (packets before the start are dropped), only slower.
             int ret = avformat_seek_file(in_.ctx, -1, INT64_MIN, start_abs_, start_abs_, 0);
             if (ret < 0) {
-                __android_log_print(ANDROID_LOG_WARN, TAG, "seek failed (%d), reading from the start", ret);
+                av_log(nullptr, AV_LOG_WARNING, "seek failed (%d), reading from the start\n", ret);
             } else {
                 from_beginning_ = false;
             }
@@ -101,10 +95,10 @@ private:
         if (!anchored_) {
             // End of input while looking for the start.
             if (in_.has_video && !has_candidate_) {
-                return Rejected(remux::kReasonUnsupportedMedia, false, "no video keyframe in the input");
+                return Rejected(FFKX_ERROR_UNSUPPORTED_MEDIA, false, "no video keyframe in the input");
             }
             if (!has_candidate_ || pending_end_abs_ <= start_abs_) {
-                return Rejected(remux::kReasonRangeOutsideMedia, false, "start is at or beyond the end of the media");
+                return Rejected(FFKX_ERROR_RANGE_OUTSIDE_MEDIA, false, "start is at or beyond the end of the media");
             }
             int ret = Flush();
             if (ret < 0) return Failure(ret, true, "write output");
@@ -298,11 +292,11 @@ private:
             if (track.output_index >= 0) total += track.written;
         }
         if (total == 0) {
-            return Rejected(remux::kReasonRangeOutsideMedia, false, "no packets in the requested range");
+            return Rejected(FFKX_ERROR_RANGE_OUTSIDE_MEDIA, false, "no packets in the requested range");
         }
         for (unsigned i = 0; i < in_.tracks.size(); ++i) {
             if (in_.tracks[i].output_index >= 0 && in_.tracks[i].written == 0) {
-                return Rejected(remux::kReasonUnsupportedMedia, false,
+                return Rejected(FFKX_ERROR_UNSUPPORTED_MEDIA, false,
                                 "stream " + std::to_string(i) + " has no packets in the requested range");
             }
         }
@@ -342,26 +336,16 @@ private:
 
 }  // namespace
 
-// Reads from `input_path` (UTF-8 bytes) or, when `input_fd` >= 0, from that descriptor; stops with
-// AVERROR_EXIT when `task` (a NativeTask handle, or 0) is cancelled, and reports progress to it.
-// Returns a NativeRemuxStatus whose times are [actual start, actual end) in microseconds.
-extern "C" JNIEXPORT jobject JNICALL
-Java_io_github_nova_ffmpegkit_NativeTrim_trim(
-        JNIEnv* env,
-        jobject /* this */,
-        jbyteArray input_path,
-        jint input_fd,
-        jbyteArray output,
-        jlong start_us,
-        jlong end_us,
-        jboolean edit_list,
-        jlong task) {
-    remux::LogScope logs(remux::LogOf(task));
-    remux::Task scratch;
-    Trimmer trimmer(remux::ToSource(env, input_path, input_fd), ToUtf8Path(env, output), start_us, end_us,
-                    edit_list == JNI_TRUE, remux::FromHandle(task, &scratch));
+namespace remux {
+
+Status Trim(const TrimRequest& request, Task* task, int64_t* actual_start_us, int64_t* actual_end_us) {
+    Trimmer trimmer(request, task);
     const Status status = trimmer.Run();
-    std::vector<int64_t> times;
-    if (!status.failed()) times = {trimmer.actual_start_us(), trimmer.actual_end_us()};
-    return remux::ToJava(env, status, times);
+    if (!status.failed()) {
+        *actual_start_us = trimmer.actual_start_us();
+        *actual_end_us = trimmer.actual_end_us();
+    }
+    return status;
 }
+
+}  // namespace remux

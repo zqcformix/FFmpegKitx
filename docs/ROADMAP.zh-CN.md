@@ -15,10 +15,11 @@
 
 完成一项或改变计划时更新本节，新的会话从这里接手。
 
-- **当前阶段**：M1 已完成，首个编辑版本 `v1.1.0` 于 2026-10-18 发布（JitPack 与 GitHub Release）。下一阶段为 M2 可靠内核。
-- **最近完成**：2026-10-18 完成 5.3（#28）、5.2（进度 #26、日志 #27）与 5.1（#26，会话状态机为内部实现，公开会话对象留给 12.1）。此前 2026-10-18 完成 4.4：`v1.1.0` 发布，从 JitPack 解析后在 ARM64 真机与 x86_64 模拟器上运行裁剪/分割（记录见 4.4 与[发布文档](RELEASES.zh-CN.md)第 6 节）。此前完成 2.4（#23）、1.2（#22）、2.6（#21）、3.2、2.3、3.1。小米真机每次安装 APK 都需要在手机上确认，无人值守时用模拟器（设 `ANDROID_SERIAL=emulator-5554`）。
-- **进行中**（分支 `feat/concurrency-limits`，未合并）：5.4——`FFmpeg.limits`（默认 4 个并发、128 MiB 缓冲预算）、可取消的 FIFO 排队、trim 缓冲上限、不保留历史；契约见 [Android 编辑 API](ANDROID_API.zh-CN.md) 第 5 节。合并后勾选 5.4，第 5 章完成。
-- **下一步**：第 6 章 6.1——从可移植 C++ 核心到稳定 C ABI。
+- **当前阶段**：M1 已完成，首个编辑版本 `v1.1.0` 于 2026-10-18 发布（JitPack 与 GitHub Release）。M2 可靠内核进行中：第 5 章已完成。
+- **最近完成**：2026-10-18 完成 5.4（#29），第 5 章全部完成；此前完成 5.3（#28）、5.2（进度 #26、日志 #27）与 5.1（#26，会话状态机为内部实现，公开会话对象留给 12.1）。此前 2026-10-18 完成 4.4：`v1.1.0` 发布，从 JitPack 解析后在 ARM64 真机与 x86_64 模拟器上运行裁剪/分割（记录见 4.4 与[发布文档](RELEASES.zh-CN.md)第 6 节）。此前完成 2.4（#23）、1.2（#22）、2.6（#21）、3.2、2.3、3.1。小米真机每次安装 APK 都需要在手机上确认，无人值守时用模拟器（设 `ANDROID_SERIAL=emulator-5554`）。
+- **进行中**（分支 `feat/c-abi`，未合并）：6.1——公开头文件 `include/ffmpegkitx.h`（前缀 `ffkx_`，ABI 版本 0.1），新增只导出 `ffkx_*` 的 `libffmpegkitx_core.so`，JNI 改为只经头文件调用；C11 测试程序 `ffkx_capi_test`（`connectedCapiTest`）。设计见[架构文档](ARCHITECTURE.zh-CN.md)第 2.1 节。合并后勾选 6.1。
+- **下一步**：6.2 线程与回调契约（取消与销毁的竞争、回调线程与用户数据释放）。
+- **已定决策**（2026-10-18）：Swift、Node-API 共享头文件的验收移到 13.1、14.2；C ABI 先用 0.x，第二个平台绑定实际用过、或头文件单独分发时再冻结为 1.0。
 - **验证环境**：Xiaomi M2102K1AC（Android 14，API 34，arm64-v8a）真机；AVD `375x812_Unit_IN`。
 
 ## 当前基线
@@ -87,11 +88,11 @@
 - [x] **5.1 会话状态机**（★★★；依赖：2.5）。交付：唯一任务 ID，等待/执行/成功/失败/取消状态，输出与耗时；终态只发一次。验收：并行任务不串结果；取消完成与失败的优先级确定。证据：#26。内部 `Session`（`Session.kt`）：进程内唯一 ID，排队 → 执行 → 成功 | 失败 | 取消，终态以 CAS 只设置一次、在资源释放之后设置，并记录结果或异常与耗时；终态即调用的结束方式，优先级规则见 [Android 编辑 API](ANDROID_API.zh-CN.md) 第 5 节。公开的会话对象留给 12.1。host 测试 `SessionTest`（终态唯一、并发结束只有一个赢家、排队中取消）与 `RunNativeTest`（8 个并行任务的结果与进度互不串扰、取消引起的失败记为取消、回调异常优先）；仪器测试 `ProgressTest` 中 4 个并行 trim 各自经历排队/执行/成功且结果对应。2026-10-18 在 x86_64 模拟器（API 35）上 `:ffmpegkit:connectedDebugAndroidTest` 97/97 通过。2026-10-18 在 Xiaomi M2102K1AC（arm64-v8a，API 34）上以 #29 分支 `8379cdf` 加测试调整运行全部 115 个仪器测试：112 通过，`ProgressTest` 中 3 项因该机内核预读、观察不到写出途中的进度而按假设跳过（进度数值本身校验通过）。
 - [x] **5.2 结构化进度与日志**（★★★；依赖：5.1、3.2）。交付：已处理时间、目标时长、字节、速度、受限日志缓冲、脱敏选项。验收：未知时长显示不定进度，终态正确；日志不会无限占内存，也不会跨任务误归属。证据：进度 #26、日志 #27，契约见 [Android 编辑 API](ANDROID_API.zh-CN.md) 第 5 节。进度：`onProgress`/`MediaProgress`（`fraction`、目标时间轴上的 `processed`/`total`、`bytesWritten`、`segmentIndex`、`speed`），总时长未知时 `fraction` 为 `null`、交付后为 1.0；host 测试 `ProgressReporterTest`，仪器测试 `ProgressTest`（含时长未知的 ADTS）。日志：`MediaLog` 挂在结果与 `FFmpegException` 上，按执行线程归属、每任务最多 `maxEntries` 条、路径脱敏为 `<input>`/`<output>`；host 测试 `MediaLogTest`，仪器测试 `LogTest`（真实的 `moov atom not found`、DEBUG 级别 5 条上限下丢弃 2,253 条、含中文与空格的路径脱敏、3 轮 × 8 个并行任务不串日志）。2026-10-18 在 x86_64 模拟器（API 35）上 `:ffmpegkit:connectedDebugAndroidTest` 104/104 通过。2026-10-18 在 Xiaomi M2102K1AC（arm64-v8a，API 34）上以 #29 分支 `8379cdf` 加测试调整运行全部 115 个仪器测试：112 通过，`ProgressTest` 中 3 项因该机内核预读、观察不到写出途中的进度而按假设跳过（进度数值本身校验通过）。
 - [x] **5.3 可中断 I/O 与取消闭环**（★★★；依赖：5.1）。交付：原子取消标记、`AVIOInterruptCB`、超时、资源回收与回调生命周期。验收：读取卡住、队列等待、写入途中均可取消；取消后没有迟到的成功回调。证据：#28，契约见 [Android 编辑 API](ANDROID_API.zh-CN.md) 第 5 节。描述符输入经 `FdReader`（辅助线程对描述符副本 `pread`）读取，卡住的读取在取消后约 20 ms 内放弃；`FFmpeg.readTimeout`（默认不限时）超时报 `IO`/`ETIMEDOUT`；打开 `Uri` 用 `CancellationSignal`，交付复制每 8 MiB 检查取消；调用只要不是正常返回就撤回已发布的文件（身份仍匹配时）。仪器测试 `InterruptibleIoTest`：裁剪、分割与打开时卡住的读取 25–33 ms 内取消，300 ms 超时约 330 ms 后报 `IO`，交付完成后才到达的取消删除裁剪输出与分割段；host 测试覆盖排队中取消、复制中取消、分段之间取消与迟到取消的回滚。2026-10-18 在 x86_64 模拟器（API 35）上 `:ffmpegkit:connectedDebugAndroidTest` 两次 111/111。2026-10-18 在 Xiaomi M2102K1AC（arm64-v8a，API 34）上以 #29 分支 `8379cdf` 加测试调整运行全部 115 个仪器测试：112 通过，`ProgressTest` 中 3 项因该机内核预读、观察不到写出途中的进度而按假设跳过（进度数值本身校验通过）；卡住的读取 28–32 ms 内取消，300 ms 超时约 351 ms 后报 `IO`。真实云盘提供方未验证。
-- [ ] **5.4 并发额度与历史策略**（★★★；依赖：5.1–5.3）。交付：按任务数和内存限制的队列、历史条数与日志上限。验收：移动端连续任务不出现无界的线程或内存增长。
+- [x] **5.4 并发额度与历史策略**（★★★；依赖：5.1–5.3）。交付：按任务数和内存限制的队列、历史条数与日志上限。验收：移动端连续任务不出现无界的线程或内存增长。证据：#29，契约见 [Android 编辑 API](ANDROID_API.zh-CN.md) 第 5 节。`FFmpeg.limits`（默认 4 个并发、128 MiB 缓冲预算）：trim、split、probe 共用并发额度，超出的调用按先来先服务排队（会话保持 `QUEUED`，可在排队中取消）；每个执行中的任务可缓冲 `maxBufferedBytes / maxConcurrentOperations`，trim 达到额度时在已找到的关键帧处起始，不因额度失败；不保留会话历史，日志由 `MediaLog.Options.maxEntries` 限制。host 测试 `OperationQueueTest`（峰值不超额度、按调用顺序开始、排队中取消不执行、发放与取消竞争 200 轮不泄漏额度）。仪器测试 `ResourceLimitsTest`：额度 2 时 12 个并行 trim 峰值不超过 2；16 KB 预算下长 GOP 的 MP4 trim 与不限预算时写出完全相同的包，MPEG-TS trim 解码无错误；100 轮操作后线程数与 native 堆不增长。2026-10-18 在 x86_64 模拟器（API 35）上 `:ffmpegkit:connectedDebugAndroidTest` 两次 115/115；在 Xiaomi M2102K1AC（arm64-v8a，API 34）上 112 通过、3 项按假设跳过（同 5.1），100 轮后线程 33 → 33、native 堆 28.10 → 27.71 MB。
 
 ### 第 6 章　稳定跨平台边界
 
-- [ ] **6.1 从可移植 C++ 核心到 C ABI**（★★★；依赖：第 5 章）。交付：不暴露 `std::string`、异常或 FFmpeg 内部结构的公开 C 头文件；不透明句柄、版本号、结构体大小、状态码、释放函数。验收：C、JNI、Swift、Node-API 绑定共享同一头文件；跨版本兼容测试通过。
+- [ ] **6.1 从可移植 C++ 核心到 C ABI**（★★★；依赖：第 5 章）。交付：不暴露 `std::string`、异常或 FFmpeg 内部结构的公开 C 头文件；不透明句柄、版本号、结构体大小、状态码、释放函数。验收：C 与 JNI 绑定共享同一头文件，头文件能按严格的 C99 与 C++11 编译；跨版本兼容测试（`struct_size` 协商规则、各 ABI 的布局与常量固定）通过。Swift、Node-API 共享同一头文件的验收在 13.1、14.2。ABI 版本先用 0.x，第二个平台绑定实际用过、或头文件单独分发时冻结为 1.0。
 - [ ] **6.2 线程与回调契约**（★★★；依赖：6.1）。交付：回调所在线程、用户数据释放时机、禁止重入点与安全销毁说明。验收：取消与销毁竞争时没有悬空回调；结果内存按契约只释放一次。
 - [ ] **6.3 可选底层命令入口**（★★★★；依赖：第 5 章、6.1）。交付：经过隔离与可重入审计的 CLI 引擎，或明确受限的命令执行后端；参数数组接口。验收：实际运行命令、引用路径、并行隔离与取消均通过；不接受拼接字符串。
 
@@ -136,9 +137,11 @@
 
 ## 第四卷 · Apple 与 HarmonyOS（M4）
 
+开始本卷前，先决定输出保护放在哪一层。临时文件、不覆盖已有文件的发布、失败回滚、排队限流和日志路径脱敏，目前只在 Android 的 Kotlin 层实现（[架构文档](ARCHITECTURE.zh-CN.md)第 2.1 节）；C ABI 的操作会直接创建或截断输出文件。可以先把这些保护下沉到 C++ 核心、经 C ABI 提供，也可以在各平台 facade 中重做并复用 Android 的测试用例。估算 13.x、14.x 的工作量时要包含这一部分。平台包在具备这些保护之前不发布。
+
 ### 第 13 章　iOS / iPadOS / macOS / Swift
 
-- [ ] **13.1 Apple 构建与 SwiftPM**（★★★★；依赖：第 6、7 章）。交付：区分设备与模拟器 slice 的 XCFramework、Swift facade 与 `Package.swift`、校验和与 deployment target。验收：macOS CI 上 Xcode 实际链接并运行；Linux 上编译通过不能代替。
+- [ ] **13.1 Apple 构建与 SwiftPM**（★★★★；依赖：第 6、7 章）。交付：区分设备与模拟器 slice 的 XCFramework、Swift facade 与 `Package.swift`、校验和与 deployment target。验收：macOS CI 上 Xcode 实际链接并运行；Linux 上编译通过不能代替。Swift facade 只经 C ABI 头文件 `include/ffmpegkitx.h` 访问核心（6.1 移来的验收），C ABI 测试程序在 Apple 目标上通过。
 - [ ] **13.2 Swift 并发与资源扩展**（★★★；依赖：第 5 章、13.1）。交付：`async throws`、`AsyncStream`、`actor` 会话、`URL` 扩展；取消映射与 `Sendable` 审查。验收：`Task.cancel()` 能传到底层；流结束时释放观察者；不在主 actor 处理媒体。
 - [ ] **13.3 Photos、文件访问与后台策略**（★★★★；依赖：3.1、13.2）。交付：Photos 输入、security-scoped URL、临时文件寿命、后台过期处理。验收：权限撤销、iCloud 未下载素材、切到后台都有明确结果。
 - [ ] **13.4 VideoToolbox 与平台差异**（★★★★；依赖：10.4、13.1）。交付：硬件选择与回退；macOS/tvOS/visionOS 单独的能力表。验收：真机与模拟器分开测试，不把 iOS 支持自动扩展到所有 Apple 平台。
@@ -146,7 +149,7 @@
 ### 第 14 章　HarmonyOS / OpenHarmony / ArkTS
 
 - [ ] **14.1 OH SDK 交叉编译与 HAR**（★★★★；依赖：第 6、7 章）。交付：锁定 SDK/API、CPU 架构、CMake toolchain、原生库与 HAR 包。验收：分别列出商业 HarmonyOS 与 OpenHarmony 的实测版本；Android `.so` 不能作为兼容证明。
-- [ ] **14.2 Node-API 绑定与 ArkTS API**（★★★★；依赖：第 5 章、14.1）。交付：Promise 入口、显式的状态/进度订阅、取消句柄；异步原生工作与线程安全回调。验收：不阻塞 ArkUI 主线程，不跨线程直接使用 `napi_env`；关闭页面后回调与 native 引用被释放。
+- [ ] **14.2 Node-API 绑定与 ArkTS API**（★★★★；依赖：第 5 章、14.1）。交付：Promise 入口、显式的状态/进度订阅、取消句柄；异步原生工作与线程安全回调。验收：不阻塞 ArkUI 主线程，不跨线程直接使用 `napi_env`；关闭页面后回调与 native 引用被释放。Node-API 绑定只经 C ABI 头文件 `include/ffmpegkitx.h` 访问核心（6.1 移来的验收）。
 - [ ] **14.3 文件、生命周期与示例**（★★★；依赖：3.1、14.2）。交付：应用沙箱、文件选择器与媒体权限、文件描述符桥接、ArkUI 示例。验收：选取 → 裁剪 → 预览 → 取消在目标设备上跑通，权限与生命周期可恢复。
 - [ ] **14.4 OHPM 与消费者工程**（★★★；依赖：14.1–14.3、7.4）。交付：独立包名、版本与公开来源，HAR 完整性与接入说明。验收：新建工程从公开仓库安装已发布版本；同仓源码依赖不能证明发布可用。
 

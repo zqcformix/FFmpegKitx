@@ -30,7 +30,7 @@
    .\gradlew.bat :ffmpegkit:publishToMavenLocal
    ```
 
-   `publishToMavenLocal` 只生成本地内容，不等于发布远端包。所有 Maven 发布任务都会先运行 `verifyNativeAlignment`，JitPack 构建也一样。设备侧验证库加载、真实剪辑与分割、异常路径、长任务资源释放和最低支持版本。
+   `publishToMavenLocal` 只生成本地内容，不等于发布远端包。所有 Maven 发布任务都会先运行 `verifyNativeAlignment`，JitPack 构建也一样。设备侧验证库加载、真实剪辑与分割、异常路径、长任务资源释放和最低支持版本；C ABI 测试程序用 `:ffmpegkit:connectedCapiTest` 在设备上运行（64 位设备加 `-PcapiTestAbi=armeabi-v7a` 再跑一次 32 位）。
 3. **产物记录**：计算 SHA-256；生成组件清单或 SPDX/CycloneDX SBOM；保留原始构建日志、构建配置、工具链版本和来源定位。
 4. **消费者验证**：在空白消费者工程中用拟发布坐标构建；检查传递依赖、R8/ProGuard、打包后的 `.so`、sources/Javadoc 和 POM。消费者工程须用 Kotlin 并采用新建工程的默认配置（当前为 AGP 9 内置 Kotlin），Java 工程发现不了 Kotlin 元数据版本过新之类的问题（见第 6 节）。
 5. **发布说明**：写清新增 API、行为变化、兼容性、限制、迁移示例和验证范围。签名与凭据由发布环境安全注入。
@@ -95,6 +95,10 @@ Google Play 自 2025-11-01 起要求面向 Android 15+ 的新应用和更新支�
 - [ ] 实际发布后，把本文的规划坐标替换为真实包名、版本与可访问地址，并更新各平台的使用示例
 
 ## 6. 发布记录
+
+### 下一版本（未发布）
+
+发布说明须写明：AAR 每个 ABI 多一个 `libffmpegkitx_core.so`（可移植核心与 C ABI，路线图 6.1），由 `libffmpegkit.so` 加载，应用不需要改动。arm64-v8a 上两者合计约 585 KB，`v1.1.0` 的 `libffmpegkit.so` 为 378 KB，增加部分主要是两个库各带一份静态 C++ 运行时。C ABI 头文件不随 AAR 分发。
 
 ### v1.1.0（首个编辑版本，路线图 4.4）
 

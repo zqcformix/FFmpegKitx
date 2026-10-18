@@ -40,9 +40,20 @@
 按平台独立编译的 FFmpeg 与系统能力
 ```
 
-M1 从现有 Android JNI 入口接入可移植 C++ 操作，提供 `FFmpeg.trim`/`FFmpeg.split` 与 `File`/`Uri` 扩展（设计见 [Android 编辑 API](ANDROID_API.zh-CN.md)）。稳定 C ABI、完整任务运行时和跨平台 facade 属于 M2 及以后。不为尚未落地的平台添加只会抛"未实现"的空壳 SDK。
+M1 从 Android JNI 入口直接接入可移植 C++ 操作，提供 `FFmpeg.trim`/`FFmpeg.split` 与 `File`/`Uri` 扩展（设计见 [Android 编辑 API](ANDROID_API.zh-CN.md)）。6.1 起 JNI 只经 C ABI 调用核心（见 2.1）；完整任务运行时和跨平台 facade 属于 M2 及以后。不为尚未落地的平台添加只会抛"未实现"的空壳 SDK。
 
 Android、Apple、HarmonyOS 共享媒体语义、测试样本和 C ABI，不共享 UI、权限 API 或线程对象。Web 如果进入排期，可以使用独立的 wasm 运行时，但必须明确支持的操作集合与行为差异。
+
+### 2.1 C ABI（路线图 6.1）
+
+- **二进制布局**：`libffmpegkitx_core.so` 是可移植 C++ 核心（`cpp/core/`：remux、trim、split、probe、日志捕获、FdReader），只导出公开头文件 `cpp/include/ffmpegkitx.h` 声明的 `ffkx_*` 函数（链接脚本 `core/exports.map`），静态链接的 C++ 运行时也不导出，所以没有 C++ 类型能越过库边界。Android 的 JNI 库 `libffmpegkit.so`（`cpp/jni/`）依赖它，只做参数与结果转换；例外是 `errors.cpp`（编译 `AVERROR` 常量供 Kotlin 对表）和 `inspect.cpp`（测试用的解码校验），只有这两个文件能看到 FFmpeg 头文件。
+- **头文件约定**：C99；不出现 C++ 类型、异常或 FFmpeg 类型，FFmpeg 错误码只作为诊断用的数字。时间为有符号 64 位微秒，路径为 UTF-8。库分配的对象（`ffkx_task`、`ffkx_log`、`ffkx_split_result`、`ffkx_media_info`）都是不透明句柄，各有释放函数；库返回的字符串在所属对象释放前有效。
+- **版本化结构**：每个结构的第一个字段是 `struct_size`，调用方先清零再设置。传入的结构可以比库认识的短（旧头文件编译，缺少的字段按 0 处理），也可以更长（新头文件编译，库不认识的字节必须全为 0，否则报 `FFKX_ERROR_UNSUPPORTED_VERSION`）；未知的 flag 位同样报这个错误。库填写的结构按调用方的 `struct_size` 填写，库不认识的部分清零。
+- **版本号**：`ffkx_abi_version()` 与 `FFKX_ABI_VERSION_MAJOR/MINOR`，当前 0.1。0.x 期间头文件只随平台包内部分发，次版本可以做不兼容修改，但必须同步修改布局固定测试，兼容判断要求次版本完全相同。第二个平台绑定实际用过、或头文件单独分发时冻结为 1.0，之后只能追加：新字段从旧 `sizeof` 之后开始，值为 0 时保持旧行为。
+- **状态码**：`FFKX_OK` 与 15 个 `FFKX_ERROR_*`，数值永不改变。FFmpeg 错误码到状态的映射在核心里（`remux::StatusOf`），与 Kotlin 的 `AvError.reasonOf` 是同一张表，设备测试核对两者一致。`ffkx_error` 包含状态、`AVERROR`、出错的一侧，以及不含路径的消息；平台绑定在消息后补上路径或 Uri 描述。
+- **线程**（6.2 细化）：操作阻塞调用线程，不回调。同一任务同一时刻只服务一个操作；执行期间其他线程可以取消、读进度、取日志。任务要等最后一个操作返回后才能销毁。
+- **仍在平台层的部分**：输出事务（临时文件、不覆盖发布、失败回滚）、排队与会话状态、进度回调节奏、日志路径脱敏。Android 上由 Kotlin 实现；其他平台接入前再评估是否下沉到核心。
+- **验证**：`ffkx_capi_test`（C11，只用公开头文件）每次构建都会编译，其中的 `_Static_assert` 固定各 ABI 的结构布局与常量；`gradlew :ffmpegkit:connectedCapiTest` 把它推到设备上运行。头文件另按 `-std=c99` 与 `-std=c++11` 加 `-pedantic-errors -Werror` 编译。
 
 ## 3. 基础操作的契约
 
@@ -65,11 +76,11 @@ Android、Apple、HarmonyOS 共享媒体语义、测试样本和 C ABI，不共�
 - 默认保护输入和已有输出。同文件别名、符号链接、目标冲突、目录权限、可用空间都应有可解释的结果；避免检查与写入之间的覆盖竞争。
 - 输出先写临时文件，只有 trailer、关闭和必要校验都成功后才交付目标。失败或取消时，只清理本任务创建且身份仍匹配的输出，保留用户既有文件。清理失败通过 suppressed 异常报告。
 - 分割先明确每段的结果和整体失败策略：不能在失败后只返回前几段并把整个任务标为成功。大量分段要设上限，避免内存和文件句柄失控。
-- 错误区分参数、权限、资源、不支持、媒体损坏、FFmpeg 执行和取消。参数错误在执行前报告；其余失败使用带原因枚举和原生错误码的平台异常；取消不包装成普通失败。稳定的数值错误码随 C ABI 一起定义。
+- 错误区分参数、权限、资源、不支持、媒体损坏、FFmpeg 执行和取消。参数错误在执行前报告；其余失败使用带原因枚举和原生错误码的平台异常；取消不包装成普通失败。稳定的数值错误码由 C ABI 定义（`FFKX_ERROR_*`，见 2.1）。
 
 ### 3.3 原生资源
 
-用 RAII 管理 `AVFormatContext`、packet、I/O 句柄和临时文件。头文件与实际 `.so` 的 FFmpeg ABI 必须一致。JNI 和 Node-API 层只做类型转换与句柄/生命周期绑定；媒体算法应该能在不依赖 Android 类的 native 测试程序中运行。
+用 RAII 管理 `AVFormatContext`、packet、I/O 句柄和临时文件。头文件与实际 `.so` 的 FFmpeg ABI 必须一致。JNI 和 Node-API 层只做类型转换与句柄/生命周期绑定；媒体算法应该能在不依赖 Android 类的 native 测试程序中运行（`ffkx_capi_test`，见 2.1）。
 
 ## 4. 会话与事件（M2 目标契约）
 

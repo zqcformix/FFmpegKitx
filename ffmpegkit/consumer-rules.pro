@@ -3,15 +3,14 @@
 -keepclasseswithmembernames,includedescriptorclasses class io.github.nova.ffmpegkit.** {
     native <methods>;
 }
-# Constructed from remux.cpp.
+# Constructed from jni/operations.cpp.
 -keep class io.github.nova.ffmpegkit.NativeRemuxStatus {
-    <init>(int, boolean, int, java.lang.String, long[]);
+    <init>(int, int, int, byte[], long[]);
 }
-# Constructed from probe.cpp.
 -keep class io.github.nova.ffmpegkit.NativeProbeResult {
     <init>(io.github.nova.ffmpegkit.NativeRemuxStatus, long[], java.lang.String[]);
 }
-# Constructed from log.cpp.
+# Constructed from jni/task.cpp.
 -keep class io.github.nova.ffmpegkit.NativeLog {
-    <init>(int[], byte[][], byte[][], int);
+    <init>(int[], byte[][], byte[][], long);
 }

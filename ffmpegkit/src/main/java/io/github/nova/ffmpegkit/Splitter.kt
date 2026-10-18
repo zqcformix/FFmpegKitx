@@ -106,7 +106,7 @@ internal object Splitter {
                     opened.fd,
                     File(workDirectory, number(i + 1) + "." + containerExtension).path.toByteArray(),
                     range.startMicros,
-                    range.endExclusiveMicros ?: -1,
+                    range.endExclusiveMicros ?: NativeTrim.END_OF_MEDIA,
                     false, // byRanges always starts at the keyframe
                     task?.nativeHandle ?: 0L,
                 )
@@ -222,7 +222,7 @@ internal object NativeSplit {
     }
 
     /**
-     * Reads [inputPath] or, when [inputFd] >= 0, that descriptor, and writes `0001.<extension>`,
+     * Reads [inputPath] or, when it is null, the descriptor [inputFd], and writes `0001.<extension>`,
      * `0002.<extension>`… into [directory]. Paths are UTF-8 bytes. Times: one [start, end) pair per segment.
      */
     @JvmStatic
