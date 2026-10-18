@@ -1,6 +1,6 @@
 # Android 编辑 API 设计（M1 草案）
 
-> **状态：已随 `v1.1.0` 发布（2026-10-18）。** 已实现：`FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`、`TrimRequest`（含 `TrimMode`）、`SplitRequest.byDuration`/`byRanges`、`MediaInput`/`MediaOutput`、`File`/`Uri` 的 `trimTo`/`splitTo`/`probe` 扩展、`MediaInfo`/`StreamInfo`、`TimeRange`、`FFmpegException`，以及第 3、4、7、8 节的行为和协程取消。**v1.1.0 之后（未发布）**：第 5 节的进度回调 `onProgress`/`MediaProgress`（路线图 5.2 的进度部分）与内部会话状态机（5.1）。**未实现**：任务日志（5.2 的日志部分）、交付复制阶段的取消（5.3）。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
+> **状态：已随 `v1.1.0` 发布（2026-10-18）。** 已实现：`FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`、`TrimRequest`（含 `TrimMode`）、`SplitRequest.byDuration`/`byRanges`、`MediaInput`/`MediaOutput`、`File`/`Uri` 的 `trimTo`/`splitTo`/`probe` 扩展、`MediaInfo`/`StreamInfo`、`TimeRange`、`FFmpegException`，以及第 3、4、7、8 节的行为和协程取消。**v1.1.0 之后（未发布）**：第 5 节的进度回调 `onProgress`/`MediaProgress`、任务日志 `MediaLog`（路线图 5.2）与内部会话状态机（5.1）。**未实现**：交付复制阶段的取消（5.3）。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
 
 本文是 M1 范围、行为与限制的唯一出处；其他文档只引用，不复述。
 
@@ -133,6 +133,21 @@ fun startTrim(
   - 进度回调抛出的异常优先于它引发的中断，原样抛出。
   - 排队中（尚未开始执行）被取消的调用不会运行。
   - 公开的会话对象（`Flow`/`StateFlow`）见路线图 12.1。
+- **任务日志**（路线图 5.2）：FFmpeg 在一次 trim/split/probe 期间记录的日志由该次调用收集，挂在 `TrimResult.log`、`SplitResult.log` 与 `FFmpegException.log`（`MediaLog`）上；probe 成功时不返回日志，失败时随异常返回。
+
+  ```kotlin
+  try {
+      input.trimTo(output, 2.seconds, 8.seconds)
+  } catch (e: FFmpegException) {
+      Log.w(TAG, "trim failed: $e\n${e.log}") // 如 "ERROR [mov,mp4,m4a,3gp,3g2,mj2] moov atom not found"
+  }
+  ```
+
+  - `MediaLog.entries` 按时间顺序给出每条的 `level`（`ERROR`、`WARNING`、`INFO`、`VERBOSE`、`DEBUG`，FFmpeg 的 panic/fatal 归入 `ERROR`，trace 归入 `DEBUG`）、`component`（记录它的 FFmpeg 组件，如 MP4 解封装器 `mov,mp4,m4a,3gp,3g2,mj2`、`aac`）与 `message`（不含结尾换行，最长 1,024 字节 UTF-8）。
+  - 归属：FFmpeg 的日志回调是全局的，本库在每次原生调用期间把执行线程标记给该任务，只收集这个线程在调用期间写的日志。并行任务不会拿到彼此的日志；不属于任何任务的日志（如 FFmpeg 自己的线程）是引擎日志，只写 logcat（标签 `FFmpegKit`，仅警告与错误，不脱敏）。
+  - 有界：每个任务只保留最近 `maxEntries` 条，更早的丢弃并计入 `droppedCount`，因此日志占用的内存有上限，不随任务时长增长。
+  - 配置：`FFmpeg.logOptions = MediaLog.Options(level, maxEntries, redactPaths)`，对之后开始的调用生效。默认 `WARNING` 及以上、100 条（上限 10,000）、脱敏。`DEBUG` 会产生大量日志（MP4 解封装器每读一个包都记一条），只用于诊断。
+  - 脱敏：`redactPaths` 为真时，本次调用交给 FFmpeg 的输入路径与输出路径（临时文件、分割的临时目录）在日志中替换为 `<input>`、`<output>`，例如 `Opening '<input>' for reading`。只替换这些已知路径；`Uri` 与描述符输入没有路径可替换。日志本身不包含最终的输出文件名。
 
 ## 6. 错误模型
 
@@ -169,7 +184,7 @@ try {
 
 - 取消不是 `FFmpegException`，按类型捕获不会吞掉取消。
 - 同一个底层错误按输入侧或输出侧区分：文件不存在在输入侧是 `INPUT_NOT_FOUND`，在输出侧表示父目录不存在，归为 `IO`。`nativeErrorCode` 只用于诊断，不要据此分支。
-- `cause` 和 `suppressed` 携带清理失败等诊断信息。
+- `cause` 和 `suppressed` 携带清理失败等诊断信息；`log` 是 FFmpeg 在这次操作中记录的日志（见第 5 节"任务日志"），操作开始前就失败时为空。
 - 错误模型在首次发布前冻结。之后只新增 `Reason` 值，调用方的 `when` 应保留 `else` 分支。
 
 ## 7. M1 范围与限制

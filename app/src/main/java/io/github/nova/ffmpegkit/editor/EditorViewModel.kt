@@ -164,7 +164,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 _state.update { EditorState(source = it.source, task = Task.Cancelled) }
                 throw e
             } catch (e: FFmpegException) {
-                Task.Failed("${e.reason}: ${e.message}", report(source, description, started.elapsedNow(), "  failed: $e"))
+                // The FFmpeg log is the evidence for why the input could not be handled.
+                val log = if (e.log.entries.isEmpty()) "" else "\n  FFmpeg log:\n" + e.log.toString().prependIndent("    ")
+                Task.Failed("${e.reason}: ${e.message}", report(source, description, started.elapsedNow(), "  failed: $e$log"))
             } catch (e: Exception) {
                 Task.Failed(e.toString(), report(source, description, started.elapsedNow(), "  failed: $e"))
             }

@@ -25,6 +25,8 @@ import java.io.IOException
  * @property reason what went wrong, for deciding how to react.
  * @property nativeErrorCode the FFmpeg `AVERROR` value when the failure came from FFmpeg, for
  *   diagnostics only; do not branch on it.
+ * @property log what FFmpeg logged during the failed operation, for diagnostics; empty for failures
+ *   raised outside an operation. See [MediaLog].
  */
 class FFmpegException(
     val reason: Reason,
@@ -32,6 +34,9 @@ class FFmpegException(
     val nativeErrorCode: Int? = null,
     cause: Throwable? = null,
 ) : IOException(message, cause) {
+
+    var log: MediaLog = MediaLog.EMPTY
+        internal set
 
     enum class Reason {
         /** The input does not exist. */

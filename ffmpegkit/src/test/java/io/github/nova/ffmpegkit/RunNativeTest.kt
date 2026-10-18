@@ -14,6 +14,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -115,6 +116,16 @@ class RunNativeTest {
     }
 
     @Test
+    fun anFFmpegExceptionCarriesTheTaskLog() {
+        val log = NativeLog(intArrayOf(16), arrayOf(ByteArray(0)), arrayOf("moov atom not found".toByteArray()), 0).toMediaLog(null)
+        val task = FakeTask().apply { logged = log }
+        val thrown = assertThrows(FFmpegException::class.java) {
+            runBlocking { runNative("trim", newTask = { task }) { throw FFmpegException(FFmpegException.Reason.INVALID_MEDIA, "broken") } }
+        }
+        assertSame(log, (thrown.cause as? FFmpegException ?: thrown).log)
+    }
+
+    @Test
     fun cancelledWhileQueuedNeverRuns() {
         var ran = false
         runBlocking {
@@ -193,6 +204,12 @@ class RunNativeTest {
             if (closed) null else TaskProgress(processedUs, durationUs, processedUs / 100, 1, delivery.expectedBytes, delivery.deliveredBytes)
 
         override fun setSegment(index: Int) {}
+
+        override fun redact(path: String?, placeholder: String) {}
+
+        var logged: MediaLog = MediaLog.EMPTY
+
+        override fun log(): MediaLog = logged
 
         override fun close() {
             closed = true

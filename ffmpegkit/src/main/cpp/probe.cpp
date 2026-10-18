@@ -115,6 +115,7 @@ jobject ToJava(JNIEnv* env, const remux::Status& status, const std::vector<int64
 extern "C" JNIEXPORT jobject JNICALL
 Java_io_github_nova_ffmpegkit_NativeProbe_probe(JNIEnv* env, jclass /* clazz */, jbyteArray path, jint fd,
                                                 jlong task) {
+    remux::LogScope logs(remux::LogOf(task));
     remux::Task scratch;
     remux::Input input;
     const remux::Status status =

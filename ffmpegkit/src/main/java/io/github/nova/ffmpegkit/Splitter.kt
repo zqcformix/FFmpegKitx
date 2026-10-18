@@ -84,7 +84,7 @@ internal object Splitter {
             if (status.failed) throw status.toException(input.description, outputDirectory.path)
             (0 until status.timesUs.size / 2).map { TimeRange(status.timesUs[2 * it].microseconds, status.timesUs[2 * it + 1].microseconds) }
         }
-        return SplitResult(segments.map { (file, actual) -> SplitSegment(file, actual, requestedRange = null) })
+        return SplitResult(segments.map { (file, actual) -> SplitSegment(file, actual, requestedRange = null) }, task?.log() ?: MediaLog.EMPTY)
     }
 
     /** One segment per range, numbered in the order of [ranges]; each is what [Trimmer.trim] writes for that range. */
@@ -115,7 +115,7 @@ internal object Splitter {
                 TimeRange(status.timesUs[0].microseconds, status.timesUs[1].microseconds)
             }
         }
-        return SplitResult(segments.mapIndexed { i, (file, actual) -> SplitSegment(file, actual, ranges[i]) })
+        return SplitResult(segments.mapIndexed { i, (file, actual) -> SplitSegment(file, actual, ranges[i]) }, task?.log() ?: MediaLog.EMPTY)
     }
 
     /**
@@ -145,7 +145,11 @@ internal object Splitter {
         }
         var failure: Throwable? = null
         try {
-            val actualRanges = input.open().use { opened -> write(opened, workDirectory) }
+            val actualRanges = input.open().use { opened ->
+                task?.redact(opened.path, Redactions.INPUT)
+                task?.redact(workDirectory.path, Redactions.OUTPUT)
+                write(opened, workDirectory)
+            }
             val files = actualRanges.indices.map { i ->
                 File(workDirectory, number(i + 1) + "." + containerExtension) to
                     File(outputDirectory, fileNamePrefix + "-" + number(i + 1) + "." + containerExtension)

@@ -75,6 +75,13 @@ object FFmpeg {
         Prober.probe(input, task)
     }
 
+    /**
+     * How operations started from now on capture FFmpeg's log; see [MediaLog]. By default warnings
+     * and errors, the latest 100 entries per operation, with paths redacted.
+     */
+    @Volatile
+    var logOptions: MediaLog.Options = MediaLog.Options()
+
     /** Test hook: sees the thread each operation's work runs on. */
     @Volatile
     internal var workerThreadObserver: ((Thread) -> Unit)? = null
@@ -198,6 +205,8 @@ class TrimResult internal constructor(
     val requestedRange: TimeRange,
     val actualRange: TimeRange,
     val output: MediaOutput,
+    /** What FFmpeg logged during the trim, e.g. warnings about the input; see [MediaLog]. */
+    val log: MediaLog = MediaLog.EMPTY,
 ) {
     override fun toString(): String = "TrimResult(requested=$requestedRange, actual=$actualRange, output=$output)"
 }
@@ -206,7 +215,11 @@ class TrimResult internal constructor(
  * Result of [FFmpeg.split]: the published segments in time order ([SplitRequest.byDuration]) or in
  * the order of the requested ranges ([SplitRequest.byRanges]).
  */
-class SplitResult internal constructor(val segments: List<SplitSegment>) {
+class SplitResult internal constructor(
+    val segments: List<SplitSegment>,
+    /** What FFmpeg logged during the split, over all segments; see [MediaLog]. */
+    val log: MediaLog = MediaLog.EMPTY,
+) {
     override fun toString(): String = "SplitResult($segments)"
 }
 

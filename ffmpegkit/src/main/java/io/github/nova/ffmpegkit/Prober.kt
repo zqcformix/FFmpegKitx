@@ -6,6 +6,7 @@ import kotlin.time.Duration.Companion.microseconds
 internal object Prober {
 
     fun probe(input: MediaInput, task: Task? = null): MediaInfo = input.open().use { opened ->
+        task?.redact(opened.path, Redactions.INPUT)
         val result = NativeProbe.probe(opened.path?.toByteArray(), opened.fd, task?.nativeHandle ?: 0L)
         task?.throwIfCancelled()
         if (result.status.failed) throw result.status.toException(input.description, input.description)
