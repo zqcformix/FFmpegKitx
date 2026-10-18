@@ -67,10 +67,10 @@ internal object Splitter {
         segmentDuration: Duration,
         fileNamePrefix: String,
         containerExtension: String,
-        cancellation: NativeCancellation? = null,
+        task: Task? = null,
     ): SplitResult {
         validate(segmentDuration, fileNamePrefix, containerExtension)
-        val segments = writeAndPublish(input, outputDirectory, fileNamePrefix, containerExtension) { opened, workDirectory ->
+        val segments = writeAndPublish(input, outputDirectory, fileNamePrefix, containerExtension, task) { opened, workDirectory ->
             val status = NativeSplit.split(
                 opened.path?.toByteArray(),
                 opened.fd,
@@ -78,9 +78,9 @@ internal object Splitter {
                 containerExtension.toByteArray(),
                 segmentDuration.inWholeMicroseconds,
                 MAX_SEGMENTS,
-                cancellation?.nativeHandle ?: 0L,
+                task?.nativeHandle ?: 0L,
             )
-            cancellation?.throwIfCancelled() // before anything is published
+            task?.throwIfCancelled() // before anything is published
             if (status.failed) throw status.toException(input.description, outputDirectory.path)
             (0 until status.timesUs.size / 2).map { TimeRange(status.timesUs[2 * it].microseconds, status.timesUs[2 * it + 1].microseconds) }
         }
@@ -94,12 +94,13 @@ internal object Splitter {
         ranges: List<TimeRange>,
         fileNamePrefix: String,
         containerExtension: String,
-        cancellation: NativeCancellation? = null,
+        task: Task? = null,
     ): SplitResult {
         validate(ranges, fileNamePrefix, containerExtension)
-        val segments = writeAndPublish(input, outputDirectory, fileNamePrefix, containerExtension) { opened, workDirectory ->
+        val segments = writeAndPublish(input, outputDirectory, fileNamePrefix, containerExtension, task) { opened, workDirectory ->
             // Each range opens the input again (a descriptor is read from offset 0 every time) and seeks on its own.
             ranges.mapIndexed { i, range ->
+                task?.setSegment(i + 1)
                 val status = NativeTrim.trim(
                     opened.path?.toByteArray(),
                     opened.fd,
@@ -107,9 +108,9 @@ internal object Splitter {
                     range.startMicros,
                     range.endExclusiveMicros ?: -1,
                     false, // byRanges always starts at the keyframe
-                    cancellation?.nativeHandle ?: 0L,
+                    task?.nativeHandle ?: 0L,
                 )
-                cancellation?.throwIfCancelled() // before anything is published
+                task?.throwIfCancelled() // before anything is published
                 if (status.failed) throw status.toException("${input.description} (range ${i + 1}: $range)", outputDirectory.path)
                 TimeRange(status.timesUs[0].microseconds, status.timesUs[1].microseconds)
             }
@@ -127,6 +128,7 @@ internal object Splitter {
         outputDirectory: File,
         fileNamePrefix: String,
         containerExtension: String,
+        task: Task?,
         write: (OpenedInput, File) -> List<TimeRange>,
     ): List<Pair<File, TimeRange>> {
         if (!outputDirectory.isDirectory) {
@@ -148,7 +150,7 @@ internal object Splitter {
                 File(workDirectory, number(i + 1) + "." + containerExtension) to
                     File(outputDirectory, fileNamePrefix + "-" + number(i + 1) + "." + containerExtension)
             }
-            SegmentPublisher.publishAll(input.file, files)
+            SegmentPublisher.publishAll(input.file, files, task?.delivery)
             return files.map { it.second }.zip(actualRanges)
         } catch (e: Throwable) {
             failure = e
@@ -174,9 +176,11 @@ internal object SegmentPublisher {
     fun publishAll(
         input: File?,
         files: List<Pair<File, File>>,
-        publish: (temp: File, target: File) -> Unit = { temp, target -> OutputDelivery.publishFile(temp, target) },
+        meter: DeliveryMeter? = null,
+        publish: (temp: File, target: File) -> Unit = { temp, target -> OutputDelivery.publishFile(temp, target, meter) },
         identity: (File) -> Any? = OutputDelivery::identityOf,
     ) {
+        meter?.expect(files.sumOf { it.first.length() })
         val published = mutableListOf<Pair<File, Any?>>()
         try {
             for ((temp, target) in files) {
@@ -214,6 +218,6 @@ internal object NativeSplit {
         extension: ByteArray,
         segmentUs: Long,
         maxSegments: Int,
-        cancellation: Long,
+        task: Long,
     ): NativeRemuxStatus
 }

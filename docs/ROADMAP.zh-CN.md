@@ -17,7 +17,8 @@
 
 - **当前阶段**：M1 已完成，首个编辑版本 `v1.1.0` 于 2026-10-18 发布（JitPack 与 GitHub Release）。下一阶段为 M2 可靠内核。
 - **最近完成**：2026-10-18 完成 4.4：`v1.1.0` 发布，从 JitPack 解析后在 ARM64 真机与 x86_64 模拟器上运行裁剪/分割（记录见 4.4 与[发布文档](RELEASES.zh-CN.md)第 6 节）。此前完成 2.4（#23）、1.2（#22）、2.6（#21）、3.2、2.3、3.1。小米真机每次安装 APK 都需要在手机上确认，无人值守时用模拟器（设 `ANDROID_SERIAL=emulator-5554`）。
-- **下一步**：M2 从第 5 章开始——5.1 会话状态机与 5.2 结构化进度（编辑 API 目前没有进度回调）；5.3 中交付复制阶段的取消也尚未实现。
+- **进行中**（分支 `feat/session-progress`，未合并）：5.1 会话状态机（内部实现，公开会话对象留给 12.1）与 5.2 的进度部分——`FFmpeg.trim`/`split` 与 `trimTo`/`splitTo` 的 `onProgress` 回调、`MediaProgress`，交付复制按字节计入进度；契约见 [Android 编辑 API](ANDROID_API.zh-CN.md) 第 5 节。证据：host 测试 `SessionTest`、`ProgressReporterTest`、`RunNativeTest`，仪器测试 `ProgressTest`；2026-10-18 在 x86_64 模拟器（API 35）上 `:ffmpegkit:connectedDebugAndroidTest` 97/97 通过，ARM64 真机未跑。
+- **下一步**：合并上述分支后，另开 PR 做 5.2 的日志部分（FFmpeg `av_log` 按执行线程归属到任务、有界缓冲、脱敏选项，无法归属的记为引擎日志），两者都合并后再勾选 5.1、5.2；然后是 5.3（含交付复制阶段的取消）。
 - **验证环境**：Xiaomi M2102K1AC（Android 14，API 34，arm64-v8a）真机；AVD `375x812_Unit_IN`。
 
 ## 当前基线

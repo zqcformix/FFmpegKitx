@@ -65,38 +65,72 @@ struct Source {
     int fd = -1;
 };
 
-// Set from Kotlin (NativeCancellation) when the coroutine is cancelled. FFmpeg's interrupt callback
-// and the packet loops poll it; interrupted work fails with AVERROR_EXIT and cleans up as usual.
-struct Cancellation {
+// Shared with Kotlin (NativeTask) for the duration of one operation, which may make several native
+// calls (split by ranges trims once per range). Kotlin sets `cancelled` when the coroutine is cancelled;
+// FFmpeg's interrupt callback and the packet loops poll it, and interrupted work fails with AVERROR_EXIT
+// and cleans up as usual. The worker writes the progress counters and Kotlin polls them from another
+// thread, so every field is atomic; each has a single writer.
+struct Task {
     std::atomic<bool> cancelled{false};
+    // Media time written on the operation's target timeline, summed over its calls (see Progress).
+    std::atomic<int64_t> processed_us{0};
+    // The input's duration once it is open; -1 while unknown, or when FFmpeg only estimated it from the bit rate.
+    std::atomic<int64_t> duration_us{-1};
+    // Bytes written to all outputs, including headers and trailers.
+    std::atomic<int64_t> bytes_written{0};
+    // 1-based segment being written: set by split.cpp, or from Kotlin before each range of a split by ranges.
+    std::atomic<int32_t> segment{1};
+
     bool IsCancelled() const { return cancelled.load(std::memory_order_relaxed); }
 };
 
-// The Cancellation behind a handle from NativeCancellation.create(); never null (0 → a never-cancelled one).
-const Cancellation* FromHandle(jlong handle);
+// The Task behind a handle from NativeTask.create(), or `scratch` for handle 0 (calls made without a
+// task, whose progress nobody reads).
+Task* FromHandle(jlong handle, Task* scratch);
+
+// Reports the media time one native call has written, on top of what earlier calls of the task wrote.
+class Progress {
+public:
+    explicit Progress(Task* task) : task_(task), base_(task->processed_us.load(std::memory_order_relaxed)) {}
+
+    // `us`: target-timeline time written by this call so far; never moves backwards.
+    void Report(int64_t us) {
+        if (us <= reported_) return;
+        reported_ = us;
+        task_->processed_us.store(base_ + us, std::memory_order_relaxed);
+    }
+
+private:
+    Task* const task_;
+    const int64_t base_;
+    int64_t reported_ = 0;
+};
 
 struct Output {
     AVFormatContext* ctx = nullptr;
+    Task* task = nullptr;   // receives the bytes written
+    int64_t counted = 0;    // bytes of this output already added to task->bytes_written
 
     Output() = default;
     Output(const Output&) = delete;
     Output& operator=(const Output&) = delete;
     ~Output() { Reset(); }
     void Reset();
+    void CountBytes();  // adds what was written since the last call to task->bytes_written
 };
 
-// Opens the input and reads its stream info without selecting streams (probe.cpp).
+// Opens the input and reads its stream info without selecting streams (probe.cpp). Sets task->duration_us.
 // A file descriptor must be seekable; it is read from offset 0 and never closed here.
-Status OpenFormat(const Source& source, const Cancellation* cancellation, Input* input);
+Status OpenFormat(const Source& source, Task* task, Input* input);
 
 // OpenFormat, then selects at most one video stream plus every audio stream (M1 limits).
-Status OpenInput(const Source& source, const Cancellation* cancellation, Input* input);
+Status OpenInput(const Source& source, Task* task, Input* input);
 
 // Reads the Source passed from Kotlin as (UTF-8 path bytes or null, fd or -1).
 Source ToSource(JNIEnv* env, jbyteArray path, jint fd);
 
 // Creates the output for the selected streams and writes its header.
-Status OpenOutput(const Input& input, const std::string& path, const Cancellation* cancellation, Output* output);
+Status OpenOutput(const Input& input, const std::string& path, Task* task, Output* output);
 
 // The Status for work stopped by cancellation.
 Status Cancelled();

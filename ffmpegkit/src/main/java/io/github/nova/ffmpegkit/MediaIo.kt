@@ -122,14 +122,15 @@ sealed class MediaOutput {
  */
 internal object UriDelivery {
 
-    fun <T> deliver(output: MediaOutput.ToUri, write: (temp: File) -> T): T {
+    fun <T> deliver(output: MediaOutput.ToUri, meter: DeliveryMeter? = null, write: (temp: File) -> T): T {
         val temp = mapIoFailures(MediaRole.OUTPUT, "create temporary file for ${output.uri}") {
             File.createTempFile("ffmpegkit-", ".part." + output.containerExtension)
         }
         var failure: Throwable? = null
         try {
             val value = write(temp)
-            copyInto(temp, output)
+            meter?.expect(temp.length())
+            copyInto(temp, output, meter)
             return value
         } catch (e: Throwable) {
             failure = e
@@ -141,7 +142,7 @@ internal object UriDelivery {
         }
     }
 
-    private fun copyInto(temp: File, output: MediaOutput.ToUri) = mapIoFailures(MediaRole.OUTPUT, "write ${output.uri}") {
+    private fun copyInto(temp: File, output: MediaOutput.ToUri, meter: DeliveryMeter?) = mapIoFailures(MediaRole.OUTPUT, "write ${output.uri}") {
         val descriptor = output.resolver.openFileDescriptor(output.uri, "wt")
             ?: throw FFmpegException(Reason.IO, "write ${output.uri} failed: the provider returned no file")
         descriptor.use {
@@ -150,9 +151,10 @@ internal object UriDelivery {
                     val size = source.size()
                     var position = 0L
                     while (position < size) {
-                        val written = source.transferTo(position, size - position, target)
+                        val written = source.transferTo(position, minOf(OutputDelivery.COPY_CHUNK, size - position), target)
                         if (written <= 0) throw IOException("copy stopped at $position of $size bytes")
                         position += written
+                        meter?.delivered(written)
                     }
                     // Some providers ignore the "t" in "wt"; cut any old tail where the descriptor allows it.
                     try {

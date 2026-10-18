@@ -7,7 +7,7 @@ import kotlin.time.Duration.Companion.microseconds
  * Fast (stream copy) trimming; blocking. [FFmpeg.trim] is the public suspend entry point.
  *
  * File outputs go through [OutputDelivery] (temporary file, never overwrites, complete once this
- * returns); Uri outputs through [UriDelivery]. A cancelled [cancellation] stops the native work and
+ * returns); Uri outputs through [UriDelivery]. A cancelled [task] stops the native work and
  * nothing is published.
  */
 internal object Trimmer {
@@ -19,15 +19,17 @@ internal object Trimmer {
         input: MediaInput,
         output: MediaOutput,
         range: TimeRange,
-        cancellation: NativeCancellation? = null,
+        task: Task? = null,
         mode: TrimMode = TrimMode.KEYFRAME,
     ): TrimResult {
         val editList = mode == TrimMode.EDIT_LIST
         val times = when (output) {
             is MediaOutput.ToFile ->
-                OutputDelivery.deliver(input.file, output.file) { temp -> run(input, temp, output, range, editList, cancellation) }.value
+                OutputDelivery.deliver(input.file, output.file, task?.delivery) { temp ->
+                    run(input, temp, output, range, editList, task)
+                }.value
             is MediaOutput.ToUri ->
-                UriDelivery.deliver(output) { temp -> run(input, temp, output, range, editList, cancellation) }
+                UriDelivery.deliver(output, task?.delivery) { temp -> run(input, temp, output, range, editList, task) }
         }
         return TrimResult(range, TimeRange(times[0].microseconds, times[1].microseconds), output)
     }
@@ -38,7 +40,7 @@ internal object Trimmer {
         output: MediaOutput,
         range: TimeRange,
         editList: Boolean,
-        cancellation: NativeCancellation?,
+        task: Task?,
     ): LongArray = input.open().use { opened ->
         val status = NativeTrim.trim(
             opened.path?.toByteArray(),
@@ -47,9 +49,9 @@ internal object Trimmer {
             range.startMicros,
             range.endExclusiveMicros ?: -1,
             editList,
-            cancellation?.nativeHandle ?: 0L,
+            task?.nativeHandle ?: 0L,
         )
-        cancellation?.throwIfCancelled() // before anything is published
+        task?.throwIfCancelled() // before anything is published
         if (status.failed) throw status.toException(input.description, output.description)
         status.timesUs
     }
@@ -62,8 +64,8 @@ internal object NativeTrim {
 
     /**
      * Reads [inputPath] (UTF-8 bytes) or, when [inputFd] >= 0, that descriptor. [endUs] is -1 to trim
-     * to the end of the media; [editList] selects [TrimMode.EDIT_LIST]; [cancellation] is a
-     * [NativeCancellation] handle or 0. Times: [actual start, end).
+     * to the end of the media; [editList] selects [TrimMode.EDIT_LIST]; [task] is a
+     * [NativeTask] handle or 0 and receives the progress. Times: [actual start, end).
      */
     @JvmStatic
     external fun trim(
@@ -73,6 +75,6 @@ internal object NativeTrim {
         startUs: Long,
         endUs: Long,
         editList: Boolean,
-        cancellation: Long,
+        task: Long,
     ): NativeRemuxStatus
 }

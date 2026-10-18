@@ -13,6 +13,7 @@ import io.github.nova.ffmpegkit.FFmpeg
 import io.github.nova.ffmpegkit.FFmpegException
 import io.github.nova.ffmpegkit.MediaInfo
 import io.github.nova.ffmpegkit.MediaInput
+import io.github.nova.ffmpegkit.MediaProgress
 import io.github.nova.ffmpegkit.SplitRequest
 import io.github.nova.ffmpegkit.TimeRange
 import io.github.nova.ffmpegkit.TrimMode
@@ -72,7 +73,8 @@ class VideoSource(
 
 sealed interface Task {
     data object Idle : Task
-    class Running(val description: String) : Task
+    /** [progress] is the library's last report; null until the first one. */
+    class Running(val description: String, val progress: MediaProgress? = null) : Task
     class Done(val saved: List<SavedVideo>, val report: String) : Task
     class Failed(val message: String, val report: String) : Task
     data object Cancelled : Task
@@ -109,7 +111,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         run(source, "Trimming to $range ($mode)") {
             val name = "${source.stem}-trim-${timestamp()}.${source.extension}"
             val saved = gallery.saveTrim(name, source.outputMimeType, source.extension) { output ->
-                FFmpeg.trim(TrimRequest(MediaInput.of(resolver, source.uri), output, range, mode))
+                FFmpeg.trim(TrimRequest(MediaInput.of(resolver, source.uri), output, range, mode), ::showProgress)
             }
             "trim requested=$range mode=$mode" to listOf(saved)
         }
@@ -127,9 +129,18 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                         "${source.stem}-split-${timestamp()}",
                         source.extension,
                     ),
+                    ::showProgress,
                 )
             }
             "split segmentDuration=$segmentDuration" to saved
+        }
+    }
+
+    /** Called on a worker thread; updating the StateFlow from there is safe. */
+    private fun showProgress(progress: MediaProgress) {
+        _state.update { state ->
+            val task = state.task
+            if (task is Task.Running) EditorState(state.source, state.loadingSource, Task.Running(task.description, progress)) else state
         }
     }
 

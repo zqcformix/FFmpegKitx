@@ -114,10 +114,11 @@ jobject ToJava(JNIEnv* env, const remux::Status& status, const std::vector<int64
 
 extern "C" JNIEXPORT jobject JNICALL
 Java_io_github_nova_ffmpegkit_NativeProbe_probe(JNIEnv* env, jclass /* clazz */, jbyteArray path, jint fd,
-                                                jlong cancellation) {
+                                                jlong task) {
+    remux::Task scratch;
     remux::Input input;
     const remux::Status status =
-        remux::OpenFormat(remux::ToSource(env, path, fd), remux::FromHandle(cancellation), &input);
+        remux::OpenFormat(remux::ToSource(env, path, fd), remux::FromHandle(task, &scratch), &input);
     std::vector<int64_t> numbers;
     std::vector<std::optional<std::string>> strings;
     if (!status.failed()) Describe(input.ctx, &numbers, &strings);
