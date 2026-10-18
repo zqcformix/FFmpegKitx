@@ -25,7 +25,7 @@ class ErrorMappingTest {
         assertEquals(-1296385272, AvError.DEMUXER_NOT_FOUND)
         assertEquals(-1481985528, AvError.MUXER_NOT_FOUND)
         assertEquals(-1163346256, AvError.PATCHWELCOME)
-        assertEquals(21, AvError.all.size)
+        assertEquals(22, AvError.all.size)
         assertEquals(AvError.all.size, AvError.all.toSet().size)
     }
 
@@ -49,6 +49,7 @@ class ErrorMappingTest {
         assertEquals(Reason.OUTPUT_EXISTS, AvError.reasonOf(AvError.EEXIST, OUTPUT))
         assertEquals(Reason.INSUFFICIENT_SPACE, AvError.reasonOf(AvError.ENOSPC, OUTPUT))
         assertEquals(Reason.INSUFFICIENT_SPACE, AvError.reasonOf(AvError.EDQUOT, OUTPUT))
+        assertEquals(Reason.IO, AvError.reasonOf(AvError.ETIMEDOUT, INPUT))
     }
 
     @Test

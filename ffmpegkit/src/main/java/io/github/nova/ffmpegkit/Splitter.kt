@@ -145,7 +145,7 @@ internal object Splitter {
         }
         var failure: Throwable? = null
         try {
-            val actualRanges = input.open().use { opened ->
+            val actualRanges = input.open(task).use { opened ->
                 task?.redact(opened.path, Redactions.INPUT)
                 task?.redact(workDirectory.path, Redactions.OUTPUT)
                 write(opened, workDirectory)
@@ -154,7 +154,8 @@ internal object Splitter {
                 File(workDirectory, number(i + 1) + "." + containerExtension) to
                     File(outputDirectory, fileNamePrefix + "-" + number(i + 1) + "." + containerExtension)
             }
-            SegmentPublisher.publishAll(input.file, files, task?.delivery)
+            val published = SegmentPublisher.publishAll(input.file, files, task?.delivery)
+            task?.rollbacks?.add { e -> SegmentPublisher.rollBack(published, e) }
             return files.map { it.second }.zip(actualRanges)
         } catch (e: Throwable) {
             failure = e
@@ -173,9 +174,9 @@ internal object Splitter {
 internal object SegmentPublisher {
 
     /**
-     * Publishes each (temporary file, target) pair in order. If any step fails, removes the targets
-     * this call already published, each only while it is still the file that was published, and
-     * rethrows; targets that cannot be confirmed stay and are reported as suppressed exceptions.
+     * Publishes each (temporary file, target) pair in order and returns the targets with their
+     * identities. If any step fails, including a cancellation of [meter]'s task between two segments,
+     * [rollBack]s the targets this call already published and rethrows.
      */
     fun publishAll(
         input: File?,
@@ -183,24 +184,34 @@ internal object SegmentPublisher {
         meter: DeliveryMeter? = null,
         publish: (temp: File, target: File) -> Unit = { temp, target -> OutputDelivery.publishFile(temp, target, meter) },
         identity: (File) -> Any? = OutputDelivery::identityOf,
-    ) {
+    ): List<Pair<File, Any?>> {
         meter?.expect(files.sumOf { it.first.length() })
         val published = mutableListOf<Pair<File, Any?>>()
         try {
             for ((temp, target) in files) {
+                meter?.checkCancelled()
                 OutputDelivery.checkTarget(input, target)
                 publish(temp, target)
                 published += target to identity(target)
             }
         } catch (e: Throwable) {
-            for ((target, key) in published.asReversed()) {
-                if (key == null || identity(target) != key) {
-                    e.addSuppressed(FFmpegException(Reason.IO, "left published segment $target: cannot confirm it is unchanged"))
-                } else if (!target.delete() && target.exists()) {
-                    e.addSuppressed(FFmpegException(Reason.IO, "could not delete published segment $target"))
-                }
-            }
+            rollBack(published, e, identity)
             throw e
+        }
+        return published
+    }
+
+    /**
+     * Removes [published] targets, newest first, each only while it is still the file that was
+     * published; targets that cannot be confirmed or removed stay and are reported on [failure].
+     */
+    fun rollBack(published: List<Pair<File, Any?>>, failure: Throwable, identity: (File) -> Any? = OutputDelivery::identityOf) {
+        for ((target, key) in published.asReversed()) {
+            if (key == null || identity(target) != key) {
+                failure.addSuppressed(FFmpegException(Reason.IO, "left published segment $target: cannot confirm it is unchanged"))
+            } else if (!target.delete() && target.exists()) {
+                failure.addSuppressed(FFmpegException(Reason.IO, "could not delete published segment $target"))
+            }
         }
     }
 }

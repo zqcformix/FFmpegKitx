@@ -2,6 +2,10 @@ package io.github.nova.ffmpegkit
 
 import io.github.nova.ffmpegkit.Session.State
 import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -116,6 +120,65 @@ class RunNativeTest {
     }
 
     @Test
+    fun aCancellationAfterDeliveryRollsBackWhatWasPublished() {
+        val task = FakeTask()
+        val rolledBack = Collections.synchronizedList(mutableListOf<Throwable>())
+        val inFinalCallback = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        var outcome: Throwable? = null
+        runBlocking {
+            val job = launch(Dispatchers.Default) {
+                try {
+                    runNative("trim", reporter { if (it.fraction == 1.0) { inFinalCallback.countDown(); release.await() } }, { task }) { t ->
+                        (t as FakeTask).work(steps = 2).also { t.rollbacks.add { failure -> rolledBack += failure } }
+                    }
+                } catch (t: Throwable) {
+                    outcome = t
+                    throw t
+                }
+            }
+            assertTrue(inFinalCallback.await(5, TimeUnit.SECONDS))
+            job.cancel() // the work is done and its output delivered
+            release.countDown()
+            job.join()
+        }
+        assertTrue("got $outcome", outcome is CancellationException)
+        assertEquals(1, rolledBack.size)
+        assertTrue(rolledBack.single() is CancellationException)
+        assertEquals(State.CANCELLED, transitions.last().second)
+    }
+
+    @Test
+    fun aCallbackFailingAfterDeliveryRollsBackToo() {
+        val task = FakeTask()
+        val rolledBack = Collections.synchronizedList(mutableListOf<Throwable>())
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking {
+                runNative("trim", reporter { if (it.fraction == 1.0) throw IllegalStateException("late") }, { task }) { t ->
+                    (t as FakeTask).work(steps = 1).also { t.rollbacks.add { failure -> rolledBack += failure } }
+                }
+            }
+        }
+        assertEquals(1, rolledBack.size)
+    }
+
+    @Test
+    fun successKeepsWhatWasPublished() {
+        val task = FakeTask()
+        var rolledBack = false
+        runBlocking { runNative("trim", newTask = { task }) { t -> t.rollbacks.add { rolledBack = true } } }
+        assertFalse(rolledBack)
+    }
+
+    @Test
+    fun readTimeoutMustBePositive() {
+        assertThrows(IllegalArgumentException::class.java) { FFmpeg.readTimeout = 0.seconds }
+        assertThrows(IllegalArgumentException::class.java) { FFmpeg.readTimeout = Duration.INFINITE }
+        FFmpeg.readTimeout = 5.seconds
+        FFmpeg.readTimeout = null
+    }
+
+    @Test
     fun anFFmpegExceptionCarriesTheTaskLog() {
         val log = NativeLog(intArrayOf(16), arrayOf(ByteArray(0)), arrayOf("moov atom not found".toByteArray()), 0).toMediaLog(null)
         val task = FakeTask().apply { logged = log }
@@ -178,7 +241,10 @@ class RunNativeTest {
     /** Stands in for native work: each step takes 30 ms and writes 1/10 of the duration's worth of media. */
     private class FakeTask(private val durationUs: Long? = 1_000_000) : Task {
         override val nativeHandle = 0L
-        override val delivery = DeliveryMeter()
+        override val delivery = DeliveryMeter { isCancelled }
+        override val rollbacks = Rollbacks()
+
+        override fun onCancel(action: () -> Unit): java.io.Closeable = java.io.Closeable {}
 
         @Volatile
         override var isCancelled = false

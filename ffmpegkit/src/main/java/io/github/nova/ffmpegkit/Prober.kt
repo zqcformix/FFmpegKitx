@@ -5,7 +5,7 @@ import kotlin.time.Duration.Companion.microseconds
 /** Structured probe over probe.cpp; blocking. [FFmpeg.probe] is the public suspend entry point. */
 internal object Prober {
 
-    fun probe(input: MediaInput, task: Task? = null): MediaInfo = input.open().use { opened ->
+    fun probe(input: MediaInput, task: Task? = null): MediaInfo = input.open(task).use { opened ->
         task?.redact(opened.path, Redactions.INPUT)
         val result = NativeProbe.probe(opened.path?.toByteArray(), opened.fd, task?.nativeHandle ?: 0L)
         task?.throwIfCancelled()

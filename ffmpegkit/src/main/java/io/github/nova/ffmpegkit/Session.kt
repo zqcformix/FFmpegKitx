@@ -1,6 +1,7 @@
 package io.github.nova.ffmpegkit
 
 import java.io.Closeable
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.cancellation.CancellationException
@@ -8,10 +9,12 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.nanoseconds
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * One operation's cancellation flag and progress counters, as the blocking work sees them. The work
@@ -27,6 +30,15 @@ internal interface Task : Closeable {
 
     /** Bytes of the outputs delivered so far; written by [OutputDelivery] and [UriDelivery]. */
     val delivery: DeliveryMeter
+
+    /** Undoes what the task published, if the call does not end in success; see [runNative]. */
+    val rollbacks: Rollbacks
+
+    /**
+     * Runs [action] once when the task is cancelled (at once if it already is), e.g. to cancel a
+     * provider call. Closing the result unregisters it.
+     */
+    fun onCancel(action: () -> Unit): Closeable
 
     /** The progress counters so far, or null once closed. Callable from any thread. */
     fun progress(): TaskProgress?
@@ -64,10 +76,14 @@ internal class TaskProgress(
  * interrupt callback and between packets, then stops and cleans up; it writes the progress counters
  * as it goes.
  */
-internal class NativeTask(private val logOptions: MediaLog.Options = FFmpeg.logOptions) : Task {
+internal class NativeTask(
+    private val logOptions: MediaLog.Options = FFmpeg.logOptions,
+    readTimeout: Duration? = FFmpeg.readTimeout,
+) : Task {
     private val lock = Any()
-    private var handle: Long = create(logOptions.level.avLevel, logOptions.maxEntries)
+    private var handle: Long = create(logOptions.level.avLevel, logOptions.maxEntries, readTimeout?.inWholeMicroseconds ?: 0L)
     private val redactions = Redactions()
+    private val cancelActions = mutableListOf<() -> Unit>()
 
     @Volatile
     override var isCancelled: Boolean = false
@@ -76,13 +92,27 @@ internal class NativeTask(private val logOptions: MediaLog.Options = FFmpeg.logO
     override val nativeHandle: Long
         get() = synchronized(lock) { handle }
 
-    override val delivery = DeliveryMeter()
+    override val delivery = DeliveryMeter { isCancelled }
+
+    override val rollbacks = Rollbacks()
 
     override fun cancel() {
-        synchronized(lock) {
+        val actions = synchronized(lock) {
+            if (isCancelled) return
             isCancelled = true
             if (handle != 0L) cancel(handle)
+            cancelActions.toList().also { cancelActions.clear() }
         }
+        actions.forEach { it() } // outside the lock: an action may block briefly on a binder call
+    }
+
+    override fun onCancel(action: () -> Unit): Closeable {
+        val registered = synchronized(lock) {
+            if (!isCancelled) cancelActions += action
+            !isCancelled
+        }
+        if (!registered) action()
+        return Closeable { synchronized(lock) { cancelActions.remove(action) } }
     }
 
     override fun progress(): TaskProgress? = synchronized(lock) {
@@ -124,9 +154,12 @@ internal class NativeTask(private val logOptions: MediaLog.Options = FFmpeg.logO
             System.loadLibrary("ffmpegkit")
         }
 
-        /** [logLevel]: `AV_LOG_*`; lines at most this severe are kept, the latest [maxLogEntries] of them. */
+        /**
+         * [logLevel]: `AV_LOG_*`; lines at most this severe are kept, the latest [maxLogEntries] of them.
+         * [readTimeoutUs]: a descriptor read taking longer fails; 0 for no limit.
+         */
         @JvmStatic
-        private external fun create(logLevel: Int, maxLogEntries: Int): Long
+        private external fun create(logLevel: Int, maxLogEntries: Int, readTimeoutUs: Long): Long
 
         @JvmStatic
         private external fun log(handle: Long): NativeLog
@@ -235,6 +268,32 @@ internal class Session(
     }
 }
 
+/**
+ * What a task published, undone when its call does not end in success (roadmap 5.3): an output
+ * delivered just before a cancellation, or before a progress callback threw, is removed again so
+ * that a call never both throws and leaves outputs behind. Actions only remove files still identical
+ * to what was published, and report what they could not remove as suppressed exceptions.
+ */
+internal class Rollbacks {
+    private val actions = CopyOnWriteArrayList<(Throwable) -> Unit>()
+
+    fun add(action: (failure: Throwable) -> Unit) {
+        actions += action
+    }
+
+    /** Runs the actions, newest first, adding their own failures to [failure] as suppressed. */
+    fun run(failure: Throwable) {
+        for (action in actions.reversed()) {
+            try {
+                action(failure)
+            } catch (e: Exception) {
+                failure.addSuppressed(e)
+            }
+        }
+        actions.clear()
+    }
+}
+
 /** How often [runNative] reads the native progress counters. */
 internal val PROGRESS_INTERVAL = 100.milliseconds
 
@@ -243,7 +302,9 @@ internal val PROGRESS_INTERVAL = 100.milliseconds
  * cancelled, the native side is told to stop, and this only returns (by rethrowing the cancellation)
  * once [work] has finished cleaning up. Cancellation is never turned into an [FFmpegException].
  *
- * A failure that is an [FFmpegException] carries the task's [MediaLog].
+ * A failure that is an [FFmpegException] carries the task's [MediaLog]. Whenever the call does not
+ * return a value, including a cancellation that arrives after the work delivered its outputs, the
+ * task's [Rollbacks] run before it ends, so a call that throws leaves no published file outputs.
  *
  * With a [progress] reporter, the task's counters are read every [PROGRESS_INTERVAL] while the work
  * runs, and [ProgressReporter.finish] reports completion after [work] returned (its outputs are
@@ -257,7 +318,16 @@ internal suspend fun <T> runNative(
     work: (Task) -> T,
 ): T {
     val session = Session(operation)
-    val result = runCatching { newTask().use { task -> run(session, task, progress, work) } }
+    val result = runCatching {
+        newTask().use { task ->
+            try {
+                run(session, task, progress, work)
+            } catch (e: Throwable) {
+                withContext(NonCancellable + Dispatchers.IO) { task.rollbacks.run(e) }
+                throw e
+            }
+        }
+    }
     result.fold({ session.succeed(it) }, { session.fail(it) })
     return result.getOrThrow()
 }

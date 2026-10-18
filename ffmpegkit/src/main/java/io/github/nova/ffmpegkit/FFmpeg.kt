@@ -82,6 +82,21 @@ object FFmpeg {
     @Volatile
     var logOptions: MediaLog.Options = MediaLog.Options()
 
+    /**
+     * The longest a single read from a `Uri` or [android.os.ParcelFileDescriptor] input may take
+     * before the operation fails with [FFmpegException.Reason.IO]; null (the default) for no limit.
+     * Applies to operations started from now on. Cancellation stops a stuck read either way. Local
+     * file inputs are read by FFmpeg directly and are not affected.
+     *
+     * @throws IllegalArgumentException if set to a value that is not positive and finite.
+     */
+    @Volatile
+    var readTimeout: Duration? = null
+        set(value) {
+            require(value == null || (value.isPositive() && value.isFinite())) { "readTimeout must be positive and finite: $value" }
+            field = value
+        }
+
     /** Test hook: sees the thread each operation's work runs on. */
     @Volatile
     internal var workerThreadObserver: ((Thread) -> Unit)? = null

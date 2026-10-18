@@ -115,6 +115,29 @@ class SplitterTest {
     }
 
     @Test
+    fun cancellationBetweenSegmentsRollsBackWhatWasPublished() {
+        val files = segments(3)
+        var cancelled = false
+        assertThrows(CancellationException::class.java) {
+            SegmentPublisher.publishAll(
+                input, files,
+                meter = DeliveryMeter { cancelled },
+                publish = { temp, target -> OutputDelivery.publishFile(temp, target).also { cancelled = true } },
+                identity = { it.name },
+            )
+        }
+        assertEquals(emptyList<String>(), out.list()!!.toList())
+    }
+
+    @Test
+    fun publishedSegmentsCanBeRolledBackLater() {
+        val published = SegmentPublisher.publishAll(input, segments(2), identity = { it.name })
+        assertEquals(listOf("clip-0001.mp4", "clip-0002.mp4"), published.map { it.first.name })
+        SegmentPublisher.rollBack(published, CancellationException(), identity = { it.name })
+        assertEquals(emptyList<String>(), out.list()!!.toList())
+    }
+
+    @Test
     fun existingTargetStopsPublishingAndIsLeftAlone() {
         val files = segments(3)
         files[1].second.writeBytes(EXISTING)

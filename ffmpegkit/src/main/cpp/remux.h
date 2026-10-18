@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "fd_reader.h"
 #include "log.h"
 
 extern "C" {
@@ -50,6 +51,7 @@ struct Track {
 struct Input {
     AVFormatContext* ctx = nullptr;
     AVIOContext* io = nullptr;  // custom I/O when reading from a file descriptor
+    std::unique_ptr<FdReader> reader;  // behind `io`
     std::vector<Track> tracks;
     bool has_video = false;
     int reference_stream = -1;  // the video stream, else the first copied audio stream
@@ -73,9 +75,12 @@ struct Source {
 // and cleans up as usual. The worker writes the progress counters and Kotlin polls them from another
 // thread, so every field is atomic; each has a single writer.
 struct Task {
-    explicit Task(int log_level = AV_LOG_WARNING, int max_log_entries = 0) : log(log_level, max_log_entries) {}
+    explicit Task(int log_level = AV_LOG_WARNING, int max_log_entries = 0, int64_t read_timeout_us = 0)
+        : read_timeout_us(read_timeout_us), log(log_level, max_log_entries) {}
 
     std::atomic<bool> cancelled{false};
+    // A descriptor read that takes longer fails with AVERROR(ETIMEDOUT); 0: no limit (FdReader).
+    std::atomic<int64_t> read_timeout_us;
     // Media time written on the operation's target timeline, summed over its calls (see Progress).
     std::atomic<int64_t> processed_us{0};
     // The input's duration once it is open; -1 while unknown, or when FFmpeg only estimated it from the bit rate.

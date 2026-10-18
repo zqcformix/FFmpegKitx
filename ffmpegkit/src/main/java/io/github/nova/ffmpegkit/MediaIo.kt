@@ -2,6 +2,7 @@ package io.github.nova.ffmpegkit
 
 import android.content.ContentResolver
 import android.net.Uri
+import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
 import android.webkit.MimeTypeMap
 import io.github.nova.ffmpegkit.FFmpegException.Reason
@@ -24,24 +25,27 @@ sealed class MediaInput {
     /** The local file behind this input, if there is one; used to detect output == input. */
     internal open val file: File? get() = null
 
-    internal abstract fun open(): OpenedInput
+    /** Opens the input for native code; [task]'s cancellation cancels a provider call in progress. */
+    internal abstract fun open(task: Task? = null): OpenedInput
 
     override fun toString(): String = description
 
     internal class FromFile(override val file: File) : MediaInput() {
         override val description: String get() = file.path
-        override fun open() = OpenedInput(file.path, -1, null)
+        override fun open(task: Task?) = OpenedInput(file.path, -1, null)
     }
 
     internal class FromUri(val resolver: ContentResolver, val uri: Uri) : MediaInput() {
         override val description: String get() = uri.toString()
         override val file: File? get() = if (uri.scheme == ContentResolver.SCHEME_FILE) uri.path?.let(::File) else null
 
-        override fun open(): OpenedInput {
+        override fun open(task: Task?): OpenedInput {
             file?.let { return OpenedInput(it.path, -1, null) }
+            // A cloud provider may download the whole file here; cancelling the task cancels that.
+            val signal = CancellationSignal()
             val descriptor = mapIoFailures(MediaRole.INPUT, "open input $uri") {
                 try {
-                    resolver.openFileDescriptor(uri, "r")
+                    (task?.onCancel { signal.cancel() } ?: Closeable {}).use { resolver.openFileDescriptor(uri, "r", signal) }
                 } catch (e: FileNotFoundException) {
                     // Providers report a missing item this way, usually without an errno to go by.
                     val mapped = ioFailure(e, MediaRole.INPUT, "open input $uri")
@@ -55,7 +59,7 @@ sealed class MediaInput {
     /** Reads [descriptor] from offset 0. The caller keeps ownership and closes it. */
     internal class FromDescriptor(val descriptor: ParcelFileDescriptor) : MediaInput() {
         override val description: String get() = "file descriptor ${descriptor.fd}"
-        override fun open() = OpenedInput(null, descriptor.fd, null)
+        override fun open(task: Task?) = OpenedInput(null, descriptor.fd, null)
     }
 
     companion object {
@@ -155,6 +159,7 @@ internal object UriDelivery {
                         if (written <= 0) throw IOException("copy stopped at $position of $size bytes")
                         position += written
                         meter?.delivered(written)
+                        meter?.checkCancelled()
                     }
                     // Some providers ignore the "t" in "wt"; cut any old tail where the descriptor allows it.
                     try {

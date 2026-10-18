@@ -1,7 +1,6 @@
 #include "remux.h"
 
 #include <cerrno>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #include "jni_util.h"
@@ -11,26 +10,6 @@ namespace remux {
 namespace {
 
 constexpr int kIoBufferSize = 64 * 1024;
-
-int ReadFd(void* opaque, uint8_t* buffer, int size) {
-    const int fd = static_cast<int>(reinterpret_cast<intptr_t>(opaque));
-    ssize_t n;
-    do {
-        n = read(fd, buffer, size);
-    } while (n < 0 && errno == EINTR);
-    if (n == 0) return AVERROR_EOF;
-    return n < 0 ? AVERROR(errno) : static_cast<int>(n);
-}
-
-int64_t SeekFd(void* opaque, int64_t offset, int whence) {
-    const int fd = static_cast<int>(reinterpret_cast<intptr_t>(opaque));
-    if (whence == AVSEEK_SIZE) {
-        struct stat st {};
-        return fstat(fd, &st) == 0 && S_ISREG(st.st_mode) ? st.st_size : AVERROR(ENOSYS);
-    }
-    const off_t position = lseek(fd, offset, whence & ~AVSEEK_FORCE);
-    return position < 0 ? AVERROR(errno) : position;
-}
 
 int Interrupted(void* opaque) {
     return static_cast<const Task*>(opaque)->IsCancelled() ? 1 : 0;
@@ -109,10 +88,11 @@ Status OpenFormat(const Source& source, Task* task, Input* input) {
             const int error = AVERROR(errno);
             return Rejected(kReasonUnsupportedMedia, false, "input cannot seek (pipe or stream)", error);
         }
+        input->reader = FdReader::Open(source.fd, task);
+        if (input->reader == nullptr) return Failure(AVERROR(errno), false, "start reading the input descriptor");
         auto* buffer = static_cast<unsigned char*>(av_malloc(kIoBufferSize));
         if (buffer == nullptr) return Failure(AVERROR(ENOMEM), false, "allocate input buffer");
-        input->io = avio_alloc_context(buffer, kIoBufferSize, 0, reinterpret_cast<void*>(static_cast<intptr_t>(source.fd)),
-                                       ReadFd, nullptr, SeekFd);
+        input->io = avio_alloc_context(buffer, kIoBufferSize, 0, input->reader.get(), FdReader::Read, nullptr, FdReader::Seek);
         if (input->io == nullptr) {
             av_free(buffer);
             return Failure(AVERROR(ENOMEM), false, "allocate input context");
@@ -247,8 +227,8 @@ jobject ToJava(JNIEnv* env, const Status& status, const std::vector<int64_t>& ti
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_io_github_nova_ffmpegkit_NativeTask_create(JNIEnv* /* env */, jclass /* clazz */, jint log_level,
-                                                jint max_log_entries) {
-    return reinterpret_cast<jlong>(new remux::Task(log_level, max_log_entries));
+                                                jint max_log_entries, jlong read_timeout_us) {
+    return reinterpret_cast<jlong>(new remux::Task(log_level, max_log_entries, read_timeout_us));
 }
 
 extern "C" JNIEXPORT jobject JNICALL

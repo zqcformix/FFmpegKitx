@@ -15,13 +15,15 @@ import java.util.concurrent.atomic.AtomicLong
 
 internal enum class DeliveryMethod { RENAME, HARD_LINK, COPY }
 
-internal class Delivered<T>(val value: T, val method: DeliveryMethod)
+/** [identity]: the published file's identity right after publishing, for rolling it back; see [OutputDelivery.identityOf]. */
+internal class Delivered<T>(val value: T, val method: DeliveryMethod, val identity: Any?)
 
 /**
  * How many of an operation's output bytes are delivered, for progress (roadmap 5.2). Outputs are
  * [expect]ed once written; a rename or link delivers a whole file at once, a copy counts as it goes.
+ * Copies call [checkCancelled] between chunks, so that a cancelled task stops copying (roadmap 5.3).
  */
-internal class DeliveryMeter {
+internal class DeliveryMeter(private val isCancelled: () -> Boolean = { false }) {
     private val expected = AtomicLong()
     private val delivered = AtomicLong()
 
@@ -34,6 +36,11 @@ internal class DeliveryMeter {
 
     fun delivered(bytes: Long) {
         delivered.addAndGet(bytes)
+    }
+
+    /** Throws `CancellationException` once the task is cancelled. */
+    fun checkCancelled() {
+        if (isCancelled()) throw kotlin.coroutines.cancellation.CancellationException("cancelled")
     }
 }
 
@@ -75,7 +82,7 @@ internal object OutputDelivery {
             val value = write(temp)
             meter?.expect(temp.length())
             val method = publishOrCopy(temp.toPath(), target.toPath(), meter, publish, copy, identity)
-            return Delivered(value, method)
+            return Delivered(value, method, identity(target.toPath()))
         } catch (e: Throwable) {
             failure = e
             throw e
@@ -110,6 +117,18 @@ internal object OutputDelivery {
 
     /** Identity (device and inode) of [file], or null where the platform has none or it is missing. */
     fun identityOf(file: File): Any? = fileKey(file.toPath())
+
+    /**
+     * Removes [target] if it is still the file published with [identity]; otherwise, or if that fails,
+     * adds why it stays to [failure]. Used to roll back a delivery whose call did not succeed.
+     */
+    fun removePublished(target: File, identity: Any?, failure: Throwable, identityOf: (File) -> Any? = ::identityOf) {
+        if (identity == null || identityOf(target) != identity) {
+            failure.addSuppressed(FFmpegException(Reason.IO, "left published output $target: cannot confirm it is unchanged"))
+        } else if (!target.delete() && target.exists()) {
+            failure.addSuppressed(FFmpegException(Reason.IO, "could not delete published output $target"))
+        }
+    }
 
     /** Throws [FFmpegException] unless [target]'s directory exists and [target] does not. */
     fun checkTarget(input: File?, target: File) {
@@ -212,6 +231,7 @@ internal object OutputDelivery {
                 if (copied <= 0) throw IOException("copy stopped at $position of $size bytes")
                 position += copied
                 meter?.delivered(copied)
+                meter?.checkCancelled()
             }
         }
     }

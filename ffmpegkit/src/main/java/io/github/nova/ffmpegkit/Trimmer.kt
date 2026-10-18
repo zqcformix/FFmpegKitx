@@ -27,7 +27,10 @@ internal object Trimmer {
             is MediaOutput.ToFile ->
                 OutputDelivery.deliver(input.file, output.file, task?.delivery) { temp ->
                     run(input, temp, output, range, editList, task)
+                }.also { delivered ->
+                    task?.rollbacks?.add { failure -> OutputDelivery.removePublished(output.file, delivered.identity, failure) }
                 }.value
+            // A Uri's old content is already replaced; it cannot be rolled back. The caller owns the Uri.
             is MediaOutput.ToUri ->
                 UriDelivery.deliver(output, task?.delivery) { temp -> run(input, temp, output, range, editList, task) }
         }
@@ -41,7 +44,7 @@ internal object Trimmer {
         range: TimeRange,
         editList: Boolean,
         task: Task?,
-    ): LongArray = input.open().use { opened ->
+    ): LongArray = input.open(task).use { opened ->
         task?.redact(opened.path, Redactions.INPUT)
         task?.redact(temp.path, Redactions.OUTPUT)
         val status = NativeTrim.trim(
