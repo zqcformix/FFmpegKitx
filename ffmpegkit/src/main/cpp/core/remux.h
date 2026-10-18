@@ -1,13 +1,14 @@
 // Shared stream-copy plumbing for trim.cpp and split.cpp; probe.cpp uses the input side.
 #pragma once
 
-#include <jni.h>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "fd_reader.h"
+#include "ffmpegkitx.h"
 #include "log.h"
 
 extern "C" {
@@ -18,23 +19,25 @@ extern "C" {
 
 namespace remux {
 
-// Must match NativeRemuxStatus.REASON_* in NativeRemux.kt.
-constexpr int kReasonFromCode = 0;
-constexpr int kReasonRangeOutsideMedia = 1;
-constexpr int kReasonUnsupportedMedia = 2;
-constexpr int kReasonTooManySegments = 3;
-
+// How an operation ended; reaches callers as an ffkx_error.
 struct Status {
-    int code = 0;              // AVERROR, 0 when the failure is not an FFmpeg error
-    bool output_side = false;  // which side failed, for mapping the code
-    int reason = kReasonFromCode;
-    std::string detail;
+    ffkx_status status = FFKX_OK;
+    int code = 0;              // the FFmpeg error (AVERROR) behind the failure, 0 if none
+    bool output_side = false;  // which side failed
+    std::string message;       // what failed, without paths; see ffkx_error.message
 
-    bool failed() const { return code != 0 || reason != kReasonFromCode; }
+    bool failed() const { return status != FFKX_OK; }
 };
 
-Status Failure(int code, bool output_side, std::string detail);
-Status Rejected(int reason, bool output_side, std::string detail, int code = 0);
+// The status an FFmpeg error code means on one side (ffkx_status_from_ffmpeg_error).
+ffkx_status StatusOf(int code, bool output_side);
+
+// `action` failed with an FFmpeg error: the status follows from the code, and the message reads
+// "<action> failed: <FFmpeg's description> (<code>)".
+Status Failure(int code, bool output_side, const std::string& action);
+
+// The library refused to go on; `message` says why. `code` is the FFmpeg error that led to it, if any.
+Status Rejected(ffkx_status status, bool output_side, std::string message, int code = 0);
 
 struct PacketDeleter {
     void operator()(AVPacket* packet) const { av_packet_free(&packet); }
@@ -69,11 +72,11 @@ struct Source {
     int fd = -1;
 };
 
-// Shared with Kotlin (NativeTask) for the duration of one operation, which may make several native
-// calls (split by ranges trims once per range). Kotlin sets `cancelled` when the coroutine is cancelled;
-// FFmpeg's interrupt callback and the packet loops poll it, and interrupted work fails with AVERROR_EXIT
-// and cleans up as usual. The worker writes the progress counters and Kotlin polls them from another
-// thread, so every field is atomic; each has a single writer.
+// Behind an ffkx_task, for the duration of one platform-level operation, which may run several
+// operations (the Android facade's split by ranges trims once per range). ffkx_task_cancel sets
+// `cancelled` from any thread; FFmpeg's interrupt callback and the packet loops poll it, and interrupted
+// work fails with FFKX_ERROR_CANCELLED and cleans up as usual. The worker writes the progress counters
+// and callers read them from other threads, so every field is atomic; each has a single writer.
 struct Task {
     explicit Task(int log_level = AV_LOG_WARNING, int max_log_entries = 0, int64_t read_timeout_us = 0,
                   int64_t max_buffered_bytes = 0)
@@ -86,24 +89,17 @@ struct Task {
     std::atomic<int64_t> max_buffered_bytes;
     // Media time written on the operation's target timeline, summed over its calls (see Progress).
     std::atomic<int64_t> processed_us{0};
-    // The input's duration once it is open; -1 while unknown, or when FFmpeg only estimated it from the bit rate.
-    std::atomic<int64_t> duration_us{-1};
+    // The input's duration once it is open; FFKX_UNKNOWN while unknown, or when FFmpeg only estimated it from the bit rate.
+    std::atomic<int64_t> duration_us{FFKX_UNKNOWN};
     // Bytes written to all outputs, including headers and trailers.
     std::atomic<int64_t> bytes_written{0};
-    // 1-based segment being written: set by split.cpp, or from Kotlin before each range of a split by ranges.
+    // 1-based segment being written: set by split.cpp, or by the caller (ffkx_task_set_segment).
     std::atomic<int32_t> segment{1};
     // What FFmpeg logged on the worker thread during the task's calls (each call holds a LogScope).
     LogBuffer log;
 
     bool IsCancelled() const { return cancelled.load(std::memory_order_relaxed); }
 };
-
-// The Task behind a handle from NativeTask.create(), or `scratch` for handle 0 (calls made without a
-// task, whose progress nobody reads).
-Task* FromHandle(jlong handle, Task* scratch);
-
-// The log of the Task behind a handle, or null for handle 0 (its logs are engine logs).
-LogBuffer* LogOf(jlong handle);
 
 // Reports the media time one native call has written, on top of what earlier calls of the task wrote.
 class Progress {
@@ -143,9 +139,6 @@ Status OpenFormat(const Source& source, Task* task, Input* input);
 // OpenFormat, then selects at most one video stream plus every audio stream (M1 limits).
 Status OpenInput(const Source& source, Task* task, Input* input);
 
-// Reads the Source passed from Kotlin as (UTF-8 path bytes or null, fd or -1).
-Source ToSource(JNIEnv* env, jbyteArray path, jint fd);
-
 // Creates the output for the selected streams and writes its header.
 Status OpenOutput(const Input& input, const std::string& path, Task* task, Output* output);
 
@@ -163,7 +156,11 @@ inline int64_t ToMicros(int64_t ts, AVRational time_base) {
     return av_rescale_q(ts, time_base, AV_TIME_BASE_Q);
 }
 
-// Builds a NativeRemuxStatus for Kotlin.
-jobject ToJava(JNIEnv* env, const Status& status, const std::vector<int64_t>& times_us);
+// a + b, clamped to the int64_t range: callers' times may be anywhere up to FFKX_TIME_END.
+inline int64_t SaturatingAdd(int64_t a, int64_t b) {
+    if (b > 0 && a > INT64_MAX - b) return INT64_MAX;
+    if (b < 0 && a < INT64_MIN - b) return INT64_MIN;
+    return a + b;
+}
 
 }  // namespace remux

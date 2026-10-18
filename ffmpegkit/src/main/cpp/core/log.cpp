@@ -1,8 +1,11 @@
 #include "log.h"
 
-#include <android/log.h>
 #include <cstdarg>
 #include <cstdio>
+
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 
 extern "C" {
 #include "libavutil/log.h"
@@ -12,7 +15,7 @@ namespace remux {
 
 namespace {
 
-// Engine logs (no task) at this level or more severe go to logcat.
+// Engine logs (no task) at this level or more severe are written out (WriteEngineLog).
 constexpr int kEngineLevel = AV_LOG_WARNING;
 
 // FFmpeg may build one line from several calls; the parts are joined until a newline.
@@ -25,11 +28,17 @@ struct ThreadLog {
 
 thread_local ThreadLog current;
 
-int LogcatPriority(int level) {
-    if (level <= AV_LOG_ERROR) return ANDROID_LOG_ERROR;
-    if (level <= AV_LOG_WARNING) return ANDROID_LOG_WARN;
-    if (level <= AV_LOG_INFO) return ANDROID_LOG_INFO;
-    return ANDROID_LOG_DEBUG;
+void WriteEngineLog(int level, const std::string& component, const std::string& text) {
+#ifdef __ANDROID__
+    const int priority = level <= AV_LOG_ERROR     ? ANDROID_LOG_ERROR
+                         : level <= AV_LOG_WARNING ? ANDROID_LOG_WARN
+                         : level <= AV_LOG_INFO    ? ANDROID_LOG_INFO
+                                                   : ANDROID_LOG_DEBUG;
+    __android_log_print(priority, "FFmpegKit", "[%s] %s", component.c_str(), text.c_str());
+#else
+    (void)level;
+    fprintf(stderr, "FFmpegKit [%s] %s\n", component.c_str(), text.c_str());
+#endif
 }
 
 void Flush(ThreadLog& log) {
@@ -39,8 +48,7 @@ void Flush(ThreadLog& log) {
         if (log.buffer != nullptr) {
             log.buffer->Add(log.pending_level, std::move(log.pending_component), std::move(text));
         } else {
-            __android_log_print(LogcatPriority(log.pending_level), "FFmpegKit", "[%s] %s", log.pending_component.c_str(),
-                                text.c_str());
+            WriteEngineLog(log.pending_level, log.pending_component, text);
         }
     }
     text.clear();
@@ -73,14 +81,6 @@ void Callback(void* avcl, int level, const char* fmt, va_list vl) {
     if (!log.pending.empty() && log.pending.back() == '\n') Flush(log);
 }
 
-jbyteArray Bytes(JNIEnv* env, const std::string& text) {
-    jbyteArray bytes = env->NewByteArray(static_cast<jsize>(text.size()));
-    if (bytes != nullptr) {
-        env->SetByteArrayRegion(bytes, 0, static_cast<jsize>(text.size()), reinterpret_cast<const jbyte*>(text.data()));
-    }
-    return bytes;
-}
-
 }  // namespace
 
 void LogBuffer::Add(int level, std::string component, std::string message) {
@@ -96,7 +96,7 @@ void LogBuffer::Add(int level, std::string component, std::string message) {
     entries_.push_back(LogEntry{level, std::move(component), std::move(message)});
 }
 
-std::vector<LogEntry> LogBuffer::Entries(int* dropped) const {
+std::vector<LogEntry> LogBuffer::Entries(int64_t* dropped) const {
     std::lock_guard<std::mutex> lock(mutex_);
     *dropped = dropped_;
     return {entries_.begin(), entries_.end()};
@@ -112,38 +112,8 @@ LogScope::~LogScope() {
     current.buffer = previous_;
 }
 
-jobject LogToJava(JNIEnv* env, const LogBuffer& buffer) {
-    int dropped = 0;
-    const std::vector<LogEntry> entries = buffer.Entries(&dropped);
-    jclass log_class = env->FindClass("io/github/nova/ffmpegkit/NativeLog");
-    if (log_class == nullptr) return nullptr;
-    jmethodID constructor = env->GetMethodID(log_class, "<init>", "([I[[B[[BI)V");
-    if (constructor == nullptr) return nullptr;
-    jclass bytes_class = env->FindClass("[B");
-    if (bytes_class == nullptr) return nullptr;
-    const auto count = static_cast<jsize>(entries.size());
-    jintArray levels = env->NewIntArray(count);
-    jobjectArray components = env->NewObjectArray(count, bytes_class, nullptr);
-    jobjectArray messages = env->NewObjectArray(count, bytes_class, nullptr);
-    if (levels == nullptr || components == nullptr || messages == nullptr) return nullptr;
-    for (jsize i = 0; i < count; ++i) {
-        const jint level = entries[i].level;
-        env->SetIntArrayRegion(levels, i, 1, &level);
-        jbyteArray component = Bytes(env, entries[i].component);
-        jbyteArray message = Bytes(env, entries[i].message);
-        if (component == nullptr || message == nullptr) return nullptr;
-        env->SetObjectArrayElement(components, i, component);
-        env->SetObjectArrayElement(messages, i, message);
-        env->DeleteLocalRef(component);
-        env->DeleteLocalRef(message);
-    }
-    return env->NewObject(log_class, constructor, levels, components, messages, dropped);
+void InstallLogCallback() {
+    av_log_set_callback(Callback);
 }
 
 }  // namespace remux
-
-// Installs the log callback once the library is loaded, before any FFmpeg call can log.
-extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* /* vm */, void* /* reserved */) {
-    av_log_set_callback(remux::Callback);
-    return JNI_VERSION_1_6;
-}

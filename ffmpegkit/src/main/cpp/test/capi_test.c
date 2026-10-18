@@ -1,0 +1,1117 @@
+/*
+ * C ABI test (roadmap 6.1): a plain C11 program that uses libffmpegkitx_core only through
+ * include/ffmpegkitx.h, as a binding on any platform would. Run on a device or emulator with
+ * `gradlew :ffmpegkit:connectedCapiTest`, which pushes it with the core library, the FFmpeg libraries and
+ * the androidTest media samples, then runs `ffkx_capi_test <media dir> <empty scratch dir>`.
+ *
+ * The layout pins below are checked whenever the library is built. Media expectations are the same
+ * ffprobe-derived values the instrumented tests use (TrimTest, SplitTest, ProbeTest).
+ */
+#define _POSIX_C_SOURCE 200809L
+
+#include "ffmpegkitx.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+/* ---- Layout pins --------------------------------------------------------------------------------- */
+/*
+ * Every public struct's size and field offsets, in terms of the pointer size P, so they hold on 32-bit
+ * and 64-bit ABIs. A change here is an ABI change: see "Changing this header" in ffmpegkitx.h. When a
+ * version appends fields, keep the old offsets and add the new ones.
+ */
+#define P sizeof(void*)
+#define PIN_SIZE(type, size) _Static_assert(sizeof(type) == (size), "sizeof(" #type ")")
+#define PIN_FIELD(type, field, offset) _Static_assert(offsetof(type, field) == (offset), #type "." #field)
+
+PIN_SIZE(ffkx_error, 272);
+PIN_FIELD(ffkx_error, struct_size, 0);
+PIN_FIELD(ffkx_error, status, 4);
+PIN_FIELD(ffkx_error, ffmpeg_error, 8);
+PIN_FIELD(ffkx_error, side, 12);
+PIN_FIELD(ffkx_error, message, 16);
+
+PIN_SIZE(ffkx_task_options, 32);
+PIN_FIELD(ffkx_task_options, flags, 4);
+PIN_FIELD(ffkx_task_options, log_level, 8);
+PIN_FIELD(ffkx_task_options, max_log_entries, 12);
+PIN_FIELD(ffkx_task_options, read_timeout_us, 16);
+PIN_FIELD(ffkx_task_options, max_buffered_bytes, 24);
+
+PIN_SIZE(ffkx_progress, 32);
+PIN_FIELD(ffkx_progress, segment, 4);
+PIN_FIELD(ffkx_progress, processed_us, 8);
+PIN_FIELD(ffkx_progress, duration_us, 16);
+PIN_FIELD(ffkx_progress, bytes_written, 24);
+
+PIN_SIZE(ffkx_log_entry, 8 + 2 * P);
+PIN_FIELD(ffkx_log_entry, level, 4);
+PIN_FIELD(ffkx_log_entry, component, 8);
+PIN_FIELD(ffkx_log_entry, message, 8 + P);
+
+PIN_SIZE(ffkx_trim_options, 32 + 2 * P);
+PIN_FIELD(ffkx_trim_options, flags, 4);
+PIN_FIELD(ffkx_trim_options, input_fd, 8);
+PIN_FIELD(ffkx_trim_options, reserved, 12);
+PIN_FIELD(ffkx_trim_options, start_us, 16);
+PIN_FIELD(ffkx_trim_options, end_us, 24);
+PIN_FIELD(ffkx_trim_options, input_path, 32);
+PIN_FIELD(ffkx_trim_options, output_path, 32 + P);
+
+PIN_SIZE(ffkx_trim_result, 24);
+PIN_FIELD(ffkx_trim_result, actual_start_us, 8);
+PIN_FIELD(ffkx_trim_result, actual_end_us, 16);
+
+PIN_SIZE(ffkx_split_options, 24 + 4 * P);
+PIN_FIELD(ffkx_split_options, flags, 4);
+PIN_FIELD(ffkx_split_options, input_fd, 8);
+PIN_FIELD(ffkx_split_options, max_segments, 12);
+PIN_FIELD(ffkx_split_options, segment_us, 16);
+PIN_FIELD(ffkx_split_options, input_path, 24);
+PIN_FIELD(ffkx_split_options, output_directory, 24 + P);
+PIN_FIELD(ffkx_split_options, file_name_prefix, 24 + 2 * P);
+PIN_FIELD(ffkx_split_options, extension, 24 + 3 * P);
+
+PIN_SIZE(ffkx_segment, 24);
+PIN_FIELD(ffkx_segment, start_us, 8);
+PIN_FIELD(ffkx_segment, end_us, 16);
+
+PIN_SIZE(ffkx_probe_options, 16 + P);
+PIN_FIELD(ffkx_probe_options, flags, 4);
+PIN_FIELD(ffkx_probe_options, input_fd, 8);
+PIN_FIELD(ffkx_probe_options, reserved, 12);
+PIN_FIELD(ffkx_probe_options, input_path, 16);
+
+PIN_SIZE(ffkx_format_info, 40); /* 32-bit: 36 bytes of fields, padded to 8 */
+PIN_FIELD(ffkx_format_info, stream_count, 4);
+PIN_FIELD(ffkx_format_info, start_time_us, 8);
+PIN_FIELD(ffkx_format_info, duration_us, 16);
+PIN_FIELD(ffkx_format_info, bit_rate, 24);
+PIN_FIELD(ffkx_format_info, format_name, 32);
+
+PIN_SIZE(ffkx_stream_info, 88 + 2 * P);
+PIN_FIELD(ffkx_stream_info, media_type, 4);
+PIN_FIELD(ffkx_stream_info, flags, 8);
+PIN_FIELD(ffkx_stream_info, reserved, 12);
+PIN_FIELD(ffkx_stream_info, duration_us, 16);
+PIN_FIELD(ffkx_stream_info, bit_rate, 24);
+PIN_FIELD(ffkx_stream_info, width, 32);
+PIN_FIELD(ffkx_stream_info, height, 40);
+PIN_FIELD(ffkx_stream_info, frame_rate_num, 48);
+PIN_FIELD(ffkx_stream_info, frame_rate_den, 56);
+PIN_FIELD(ffkx_stream_info, rotation, 64);
+PIN_FIELD(ffkx_stream_info, sample_rate, 72);
+PIN_FIELD(ffkx_stream_info, channels, 80);
+PIN_FIELD(ffkx_stream_info, codec_name, 88);
+PIN_FIELD(ffkx_stream_info, channel_layout, 88 + P);
+
+/* Constant values never change. */
+_Static_assert(FFKX_OK == 0 && FFKX_ERROR_INVALID_ARGUMENT == 1 && FFKX_ERROR_UNSUPPORTED_VERSION == 2 &&
+                   FFKX_ERROR_OUT_OF_MEMORY == 3 && FFKX_ERROR_INTERNAL == 4 && FFKX_ERROR_CANCELLED == 5 &&
+                   FFKX_ERROR_INPUT_NOT_FOUND == 6 && FFKX_ERROR_ACCESS_DENIED == 7 && FFKX_ERROR_OUTPUT_EXISTS == 8 &&
+                   FFKX_ERROR_INSUFFICIENT_SPACE == 9 && FFKX_ERROR_RANGE_OUTSIDE_MEDIA == 10 &&
+                   FFKX_ERROR_TOO_MANY_SEGMENTS == 11 && FFKX_ERROR_UNSUPPORTED_MEDIA == 12 &&
+                   FFKX_ERROR_INVALID_MEDIA == 13 && FFKX_ERROR_IO == 14 && FFKX_ERROR_FFMPEG == 15,
+               "status values");
+_Static_assert(FFKX_SIDE_NONE == 0 && FFKX_SIDE_INPUT == 1 && FFKX_SIDE_OUTPUT == 2, "sides");
+_Static_assert(FFKX_MEDIA_TYPE_UNKNOWN == 0 && FFKX_MEDIA_TYPE_VIDEO == 1 && FFKX_MEDIA_TYPE_AUDIO == 2 &&
+                   FFKX_MEDIA_TYPE_SUBTITLE == 3 && FFKX_MEDIA_TYPE_DATA == 4 && FFKX_MEDIA_TYPE_ATTACHMENT == 5,
+               "media types");
+_Static_assert(FFKX_LIBRARY_AVUTIL == 1 && FFKX_LIBRARY_AVCODEC == 2 && FFKX_LIBRARY_AVFORMAT == 3 &&
+                   FFKX_LIBRARY_AVFILTER == 4 && FFKX_LIBRARY_SWSCALE == 5 && FFKX_LIBRARY_SWRESAMPLE == 6,
+               "libraries");
+_Static_assert(FFKX_LOG_PANIC == 0 && FFKX_LOG_FATAL == 8 && FFKX_LOG_ERROR == 16 && FFKX_LOG_WARNING == 24 &&
+                   FFKX_LOG_INFO == 32 && FFKX_LOG_VERBOSE == 40 && FFKX_LOG_DEBUG == 48 && FFKX_LOG_TRACE == 56,
+               "log levels");
+_Static_assert(FFKX_TRIM_EDIT_LIST == 1 && FFKX_STREAM_ATTACHED_PICTURE == 1, "flags");
+_Static_assert(FFKX_MAX_SEGMENTS == 9999 && FFKX_ERROR_MESSAGE_SIZE == 256, "limits");
+_Static_assert(FFKX_UNKNOWN == INT64_MIN && FFKX_TIME_END == INT64_MAX, "sentinels");
+
+/* ---- Harness ------------------------------------------------------------------------------------- */
+
+static const char* media_dir;
+static const char* scratch_dir;
+static char av_path[512]; /* the main sample; worker threads use this instead of sample() */
+static const char* current_test;
+static int checks, failures, skips;
+
+#define CHECK(condition)                                                                            \
+    do {                                                                                            \
+        ++checks;                                                                                   \
+        if (!(condition)) {                                                                         \
+            ++failures;                                                                             \
+            printf("FAIL %s (line %d): %s\n", current_test, __LINE__, #condition);                  \
+        }                                                                                           \
+    } while (0)
+
+#define CHECK_STATUS(expected, actual)                                                              \
+    do {                                                                                            \
+        const ffkx_status status_ = (actual);                                                       \
+        ++checks;                                                                                   \
+        if (status_ != (expected)) {                                                                \
+            ++failures;                                                                             \
+            printf("FAIL %s (line %d): expected %s, got %s\n", current_test, __LINE__,              \
+                   ffkx_status_name(expected), ffkx_status_name(status_));                          \
+        }                                                                                           \
+    } while (0)
+
+#define CHECK_I64(expected, actual)                                                                 \
+    do {                                                                                            \
+        const long long expected_ = (long long)(expected), actual_ = (long long)(actual);           \
+        ++checks;                                                                                   \
+        if (expected_ != actual_) {                                                                 \
+            ++failures;                                                                             \
+            printf("FAIL %s (line %d): %s: expected %lld, got %lld\n", current_test, __LINE__,      \
+                   #actual, expected_, actual_);                                                    \
+        }                                                                                           \
+    } while (0)
+
+#define CHECK_STR(expected, actual)                                                                 \
+    do {                                                                                            \
+        const char* expected_ = (expected);                                                         \
+        const char* actual_ = (actual);                                                             \
+        ++checks;                                                                                   \
+        if (actual_ == NULL || strcmp(expected_, actual_) != 0) {                                   \
+            ++failures;                                                                             \
+            printf("FAIL %s (line %d): %s: expected \"%s\", got \"%s\"\n", current_test, __LINE__,  \
+                   #actual, expected_, actual_ == NULL ? "(null)" : actual_);                       \
+        }                                                                                           \
+    } while (0)
+
+static void run(const char* name, void (*test)(void)) {
+    const int before = failures;
+    current_test = name;
+    test();
+    printf("%s %s\n", failures == before ? "ok  " : "FAIL", name);
+    fflush(stdout);
+}
+
+static void skip(const char* why) {
+    ++skips;
+    printf("SKIP %s: %s\n", current_test, why);
+}
+
+/* Paths are rebuilt in a few rotating buffers so that several can be live in one call; main thread only. */
+static const char* path_in(const char* dir, const char* name) {
+    static char buffers[8][512];
+    static int next;
+    char* buffer = buffers[next++ % 8];
+    snprintf(buffer, sizeof(buffers[0]), "%s/%s", dir, name);
+    return buffer;
+}
+
+static const char* sample(const char* name) {
+    return path_in(media_dir, name);
+}
+
+static const char* scratch(const char* name) {
+    return path_in(scratch_dir, name);
+}
+
+static long long file_size(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0 ? (long long)st.st_size : -1;
+}
+
+static ffkx_error new_error(void) {
+    ffkx_error error;
+    memset(&error, 0, sizeof(error));
+    error.struct_size = sizeof(error);
+    return error;
+}
+
+static ffkx_trim_options trim_options(const char* input, const char* output, int64_t start_us, int64_t end_us) {
+    ffkx_trim_options options;
+    memset(&options, 0, sizeof(options));
+    options.struct_size = sizeof(options);
+    options.input_path = input;
+    options.output_path = output;
+    options.start_us = start_us;
+    options.end_us = end_us;
+    return options;
+}
+
+static ffkx_trim_result new_trim_result(void) {
+    ffkx_trim_result result;
+    memset(&result, 0, sizeof(result));
+    result.struct_size = sizeof(result);
+    return result;
+}
+
+static ffkx_task* new_task(int32_t log_level, int32_t max_log_entries) {
+    ffkx_task_options options;
+    memset(&options, 0, sizeof(options));
+    options.struct_size = sizeof(options);
+    options.log_level = log_level;
+    options.max_log_entries = max_log_entries;
+    ffkx_task* task = NULL;
+    CHECK_STATUS(FFKX_OK, ffkx_task_create(&options, &task));
+    return task;
+}
+
+static ffkx_progress progress_of(const ffkx_task* task) {
+    ffkx_progress progress;
+    memset(&progress, 0, sizeof(progress));
+    progress.struct_size = sizeof(progress);
+    CHECK_STATUS(FFKX_OK, ffkx_task_progress(task, &progress));
+    return progress;
+}
+
+static int all_bytes_are(const unsigned char* bytes, size_t count, unsigned char value) {
+    for (size_t i = 0; i < count; ++i) {
+        if (bytes[i] != value) return 0;
+    }
+    return 1;
+}
+
+/* Whether the task's log has a line containing `text`. */
+static int log_contains(const ffkx_task* task, const char* text) {
+    ffkx_log* log = NULL;
+    if (ffkx_task_log(task, &log) != FFKX_OK) return 0;
+    int found = 0;
+    for (uint32_t i = 0; i < ffkx_log_count(log) && !found; ++i) {
+        ffkx_log_entry entry;
+        memset(&entry, 0, sizeof(entry));
+        entry.struct_size = sizeof(entry);
+        found = ffkx_log_entry_at(log, i, &entry) == FFKX_OK && strstr(entry.message, text) != NULL;
+    }
+    ffkx_log_free(log);
+    return found;
+}
+
+/* FFmpeg's error codes as a caller without FFmpeg's headers writes them: AVERROR(e) is -e, and
+ * FFERRTAG(a, b, c, d) is -MKTAG(a, b, c, d). */
+#define TAG(a, b, c, d) (-(int32_t)((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24)))
+#define FFMPEG_INVALIDDATA TAG('I', 'N', 'D', 'A')
+#define FFMPEG_EXIT TAG('E', 'X', 'I', 'T')
+#define FFMPEG_DEMUXER_NOT_FOUND TAG(0xF8, 'D', 'E', 'M')
+
+#define AV "av_h264_aac.mp4"
+
+/* ---- Versions and status ------------------------------------------------------------------------- */
+
+static void versions(void) {
+    CHECK_I64((FFKX_ABI_VERSION_MAJOR << 16) | FFKX_ABI_VERSION_MINOR, ffkx_abi_version());
+    CHECK(ffkx_abi_is_compatible());
+    CHECK_STR("8.0.1", ffkx_ffmpeg_version());
+    CHECK(strstr(ffkx_ffmpeg_configuration(), "--enable-libass") != NULL);
+    /* As PackagedLibrariesTest and README. */
+    CHECK_I64((62 << 16) | (11 << 8) | 100, ffkx_ffmpeg_library_version(FFKX_LIBRARY_AVCODEC));
+    CHECK_I64((62 << 16) | (3 << 8) | 100, ffkx_ffmpeg_library_version(FFKX_LIBRARY_AVFORMAT));
+    CHECK_I64((11 << 16) | (4 << 8) | 100, ffkx_ffmpeg_library_version(FFKX_LIBRARY_AVFILTER));
+    CHECK_I64((60 << 16) | (8 << 8) | 100, ffkx_ffmpeg_library_version(FFKX_LIBRARY_AVUTIL));
+    CHECK_I64((6 << 16) | (1 << 8) | 100, ffkx_ffmpeg_library_version(FFKX_LIBRARY_SWRESAMPLE));
+    CHECK_I64((9 << 16) | (1 << 8) | 100, ffkx_ffmpeg_library_version(FFKX_LIBRARY_SWSCALE));
+    CHECK_I64(0, ffkx_ffmpeg_library_version(0));
+    CHECK_I64(0, ffkx_ffmpeg_library_version(7));
+}
+
+static void statuses(void) {
+    CHECK_STR("FFKX_OK", ffkx_status_name(FFKX_OK));
+    CHECK_STR("FFKX_ERROR_TOO_MANY_SEGMENTS", ffkx_status_name(FFKX_ERROR_TOO_MANY_SEGMENTS));
+    CHECK_STR("FFKX_ERROR_FFMPEG", ffkx_status_name(FFKX_ERROR_FFMPEG));
+    CHECK_STR("unknown status", ffkx_status_name(16));
+    CHECK_STR("unknown status", ffkx_status_name(-1));
+
+    CHECK_STATUS(FFKX_OK, ffkx_status_from_ffmpeg_error(0, FFKX_SIDE_INPUT));
+    CHECK_STATUS(FFKX_ERROR_INPUT_NOT_FOUND, ffkx_status_from_ffmpeg_error(-ENOENT, FFKX_SIDE_INPUT));
+    CHECK_STATUS(FFKX_ERROR_IO, ffkx_status_from_ffmpeg_error(-ENOENT, FFKX_SIDE_OUTPUT));
+    CHECK_STATUS(FFKX_ERROR_ACCESS_DENIED, ffkx_status_from_ffmpeg_error(-EACCES, FFKX_SIDE_OUTPUT));
+    CHECK_STATUS(FFKX_ERROR_OUTPUT_EXISTS, ffkx_status_from_ffmpeg_error(-EEXIST, FFKX_SIDE_OUTPUT));
+    CHECK_STATUS(FFKX_ERROR_INSUFFICIENT_SPACE, ffkx_status_from_ffmpeg_error(-ENOSPC, FFKX_SIDE_OUTPUT));
+    CHECK_STATUS(FFKX_ERROR_IO, ffkx_status_from_ffmpeg_error(-ETIMEDOUT, FFKX_SIDE_INPUT));
+    CHECK_STATUS(FFKX_ERROR_OUT_OF_MEMORY, ffkx_status_from_ffmpeg_error(-ENOMEM, FFKX_SIDE_INPUT));
+    CHECK_STATUS(FFKX_ERROR_INVALID_MEDIA, ffkx_status_from_ffmpeg_error(FFMPEG_INVALIDDATA, FFKX_SIDE_INPUT));
+    CHECK_STATUS(FFKX_ERROR_UNSUPPORTED_MEDIA, ffkx_status_from_ffmpeg_error(FFMPEG_DEMUXER_NOT_FOUND, FFKX_SIDE_INPUT));
+    CHECK_STATUS(FFKX_ERROR_CANCELLED, ffkx_status_from_ffmpeg_error(FFMPEG_EXIT, FFKX_SIDE_INPUT));
+    CHECK_STATUS(FFKX_ERROR_FFMPEG, ffkx_status_from_ffmpeg_error(-EINVAL, FFKX_SIDE_INPUT));
+    CHECK_STATUS(FFKX_ERROR_FFMPEG, ffkx_status_from_ffmpeg_error(-123456, FFKX_SIDE_INPUT));
+
+    char text[64];
+    ffkx_ffmpeg_error_string(-ENOENT, text, sizeof(text));
+    CHECK_STR("No such file or directory", text);
+    ffkx_ffmpeg_error_string(FFMPEG_INVALIDDATA, text, sizeof(text));
+    CHECK_STR("Invalid data found when processing input", text);
+    ffkx_ffmpeg_error_string(-ENOENT, text, 8);
+    CHECK_STR("No such", text);
+    memset(text, 'x', sizeof(text));
+    ffkx_ffmpeg_error_string(-ENOENT, text, 0);
+    CHECK(text[0] == 'x');
+    ffkx_ffmpeg_error_string(-ENOENT, NULL, 16);
+}
+
+/* ---- Struct versions ----------------------------------------------------------------------------- */
+
+/* A caller built against a header newer than the library: its structs are longer. */
+struct newer_trim_options {
+    ffkx_trim_options known;
+    int64_t added[2];
+};
+
+struct newer_error {
+    ffkx_error known;
+    unsigned char added[24];
+};
+
+struct newer_trim_result {
+    ffkx_trim_result known;
+    unsigned char added[16];
+};
+
+static void options_versions(void) {
+    const char* output = scratch("versions.mp4");
+    ffkx_error error = new_error();
+
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_trim(NULL, NULL, NULL, &error));
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, error.status);
+    CHECK_STR("options is NULL", error.message);
+    CHECK_I64(FFKX_SIDE_NONE, error.side);
+
+    /* Shorter than the first version. */
+    ffkx_trim_options options = trim_options(sample(AV), output, 0, 1000000);
+    options.struct_size = offsetof(ffkx_trim_options, output_path);
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_trim(&options, NULL, NULL, &error));
+    options.struct_size = 0;
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_trim(&options, NULL, NULL, &error));
+    /* A garbage size is refused without reading past the struct. */
+    options.struct_size = 0xFFFFFFFFu;
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_trim(&options, NULL, NULL, &error));
+
+    /* Unknown flags and reserved fields are from a newer version. */
+    options = trim_options(sample(AV), output, 0, 1000000);
+    options.flags = 0x80000000u;
+    CHECK_STATUS(FFKX_ERROR_UNSUPPORTED_VERSION, ffkx_trim(&options, NULL, NULL, &error));
+    options.flags = 0;
+    options.reserved = 1;
+    CHECK_STATUS(FFKX_ERROR_UNSUPPORTED_VERSION, ffkx_trim(&options, NULL, NULL, &error));
+
+    /* A newer struct whose added fields are zero means what the library knows. */
+    struct newer_trim_options newer;
+    memset(&newer, 0, sizeof(newer));
+    newer.known = trim_options(sample(AV), output, 3000000, 4000000);
+    newer.known.struct_size = sizeof(newer);
+    ffkx_trim_result result = new_trim_result();
+    CHECK_STATUS(FFKX_OK, ffkx_trim(&newer.known, NULL, &result, &error));
+    CHECK_I64(3000000, result.actual_start_us);
+    CHECK_I64(4133333, result.actual_end_us);
+
+    /* An added field this library would ignore is refused before any work. */
+    unlink(output);
+    newer.added[1] = 1;
+    CHECK_STATUS(FFKX_ERROR_UNSUPPORTED_VERSION, ffkx_trim(&newer.known, NULL, NULL, &error));
+    CHECK_I64(-1, file_size(output));
+}
+
+static void result_versions(void) {
+    const char* output = scratch("results.mp4");
+
+    /* A longer error and result: the library fills what it knows and zeroes the rest. */
+    struct newer_error error;
+    memset(&error, 0xAB, sizeof(error));
+    error.known.struct_size = sizeof(error);
+    struct newer_trim_result result;
+    memset(&result, 0xAB, sizeof(result));
+    result.known.struct_size = sizeof(result);
+    ffkx_trim_options options = trim_options(sample(AV), output, 3000000, 4000000);
+    CHECK_STATUS(FFKX_OK, ffkx_trim(&options, NULL, &result.known, &error.known));
+    CHECK_I64(sizeof(error), error.known.struct_size);
+    CHECK_STATUS(FFKX_OK, error.known.status);
+    CHECK_I64(0, error.known.ffmpeg_error);
+    CHECK_STR("", error.known.message);
+    CHECK(all_bytes_are(error.added, sizeof(error.added), 0));
+    CHECK_I64(sizeof(result), result.known.struct_size);
+    CHECK_I64(3000000, result.known.actual_start_us);
+    CHECK(all_bytes_are(result.added, sizeof(result.added), 0));
+
+    /* Too short to fill: refused before any work, and nothing written. */
+    unlink(output);
+    ffkx_error short_error;
+    memset(&short_error, 0xAB, sizeof(short_error));
+    short_error.struct_size = offsetof(ffkx_error, message);
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_trim(&options, NULL, NULL, &short_error));
+    CHECK(all_bytes_are((const unsigned char*)&short_error + 4, sizeof(short_error) - 4, 0xAB));
+    ffkx_trim_result short_result = new_trim_result();
+    short_result.struct_size = 8;
+    ffkx_error error2 = new_error();
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_trim(&options, NULL, &short_result, &error2));
+    short_result.struct_size = 0x7FFFFFFFu;
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_trim(&options, NULL, &short_result, &error2));
+    CHECK_I64(-1, file_size(output));
+}
+
+static void task_options_versions(void) {
+    ffkx_task* task = NULL;
+    CHECK_STATUS(FFKX_OK, ffkx_task_create(NULL, &task));
+    CHECK(task != NULL);
+    ffkx_task_destroy(task);
+
+    struct {
+        ffkx_task_options known;
+        int64_t added;
+    } newer;
+    memset(&newer, 0, sizeof(newer));
+    newer.known.struct_size = sizeof(newer);
+    CHECK_STATUS(FFKX_OK, ffkx_task_create(&newer.known, &task));
+    ffkx_task_destroy(task);
+    newer.added = 5;
+    CHECK_STATUS(FFKX_ERROR_UNSUPPORTED_VERSION, ffkx_task_create(&newer.known, &task));
+    CHECK(task == NULL);
+
+    ffkx_task_options options;
+    memset(&options, 0, sizeof(options));
+    options.struct_size = sizeof(options);
+    options.flags = 1;
+    CHECK_STATUS(FFKX_ERROR_UNSUPPORTED_VERSION, ffkx_task_create(&options, &task));
+    options.flags = 0;
+    options.max_log_entries = -1;
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_task_create(&options, &task));
+    options.max_log_entries = 0;
+    options.read_timeout_us = -1;
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_task_create(&options, &task));
+    options.struct_size = 8;
+    options.read_timeout_us = 0;
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_task_create(&options, &task));
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_task_create(NULL, NULL));
+
+    /* Results of accessors follow the same rules. */
+    task = new_task(FFKX_LOG_WARNING, 10);
+    struct {
+        ffkx_progress known;
+        unsigned char added[8];
+    } progress;
+    memset(&progress, 0xAB, sizeof(progress));
+    progress.known.struct_size = sizeof(progress);
+    CHECK_STATUS(FFKX_OK, ffkx_task_progress(task, &progress.known));
+    CHECK_I64(FFKX_UNKNOWN, progress.known.duration_us);
+    CHECK_I64(1, progress.known.segment);
+    CHECK(all_bytes_are(progress.added, sizeof(progress.added), 0));
+    progress.known.struct_size = 4;
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_task_progress(task, &progress.known));
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_task_progress(NULL, &progress.known));
+    ffkx_task_destroy(task);
+}
+
+/* ---- Trim ---------------------------------------------------------------------------------------- */
+
+static void trim_from_path(void) {
+    const char* output = scratch("trim.mp4");
+    ffkx_trim_options options = trim_options(sample(AV), output, 2500000, 4500000);
+    ffkx_trim_result result = new_trim_result();
+    ffkx_error error = new_error();
+    CHECK_STATUS(FFKX_OK, ffkx_trim(&options, NULL, &result, &error));
+    /* Starts at the keyframe at 2 s; the last video packet decoded before 4.5 s ends at 4.633 s. */
+    CHECK_I64(2000000, result.actual_start_us);
+    CHECK_I64(4633333, result.actual_end_us);
+    CHECK_STATUS(FFKX_OK, error.status);
+    CHECK_I64(FFKX_SIDE_NONE, error.side);
+    CHECK(file_size(output) > 0);
+
+    /* An end beyond the media, or FFKX_TIME_END, trims to its end. */
+    options = trim_options(sample(AV), scratch("trim-end.mp4"), 7500000, FFKX_TIME_END);
+    CHECK_STATUS(FFKX_OK, ffkx_trim(&options, NULL, &result, NULL));
+    CHECK_I64(7000000, result.actual_start_us);
+    CHECK_I64(10000000, result.actual_end_us);
+    options = trim_options(sample(AV), scratch("trim-end2.mp4"), 7500000, 60000000);
+    CHECK_STATUS(FFKX_OK, ffkx_trim(&options, NULL, &result, NULL));
+    CHECK_I64(10000000, result.actual_end_us);
+
+    /* The output holds what the result says. */
+    ffkx_probe_options probe;
+    memset(&probe, 0, sizeof(probe));
+    probe.struct_size = sizeof(probe);
+    probe.input_path = output;
+    ffkx_media_info* info = NULL;
+    CHECK_STATUS(FFKX_OK, ffkx_probe(&probe, NULL, &info, NULL));
+    ffkx_format_info format;
+    memset(&format, 0, sizeof(format));
+    format.struct_size = sizeof(format);
+    CHECK_STATUS(FFKX_OK, ffkx_media_info_format(info, &format));
+    CHECK_I64(2, format.stream_count);
+    /* 2.567 s: MP4 counts video in decoding order, which with B-frames ends before the last picture shown. */
+    CHECK(format.duration_us >= 2500000 && format.duration_us <= 2700000);
+    ffkx_media_info_free(info);
+}
+
+static void trim_from_descriptor(void) {
+    const int fd = open(sample(AV), O_RDONLY | O_CLOEXEC);
+    CHECK(fd >= 0);
+    CHECK(lseek(fd, 1000, SEEK_SET) == 1000); /* read from offset 0 regardless */
+    ffkx_trim_options options = trim_options(NULL, scratch("fd.mp4"), 3000000, 4000000);
+    options.input_fd = fd;
+    ffkx_trim_result result = new_trim_result();
+    CHECK_STATUS(FFKX_OK, ffkx_trim(&options, NULL, &result, NULL));
+    CHECK_I64(3000000, result.actual_start_us);
+    CHECK_I64(4133333, result.actual_end_us);
+    /* Still open: the caller owns it. */
+    CHECK(fcntl(fd, F_GETFD) != -1);
+    close(fd);
+
+    /* A path wins over the descriptor; zero-initialized options therefore read the path, not fd 0. */
+    options = trim_options(sample(AV), scratch("fd-path.mp4"), 3000000, 4000000);
+    options.input_fd = 0;
+    CHECK_STATUS(FFKX_OK, ffkx_trim(&options, NULL, &result, NULL));
+
+    /* A pipe cannot seek. */
+    int pipe_fds[2];
+    CHECK(pipe(pipe_fds) == 0);
+    options = trim_options(NULL, scratch("pipe.mp4"), 0, 1000000);
+    options.input_fd = pipe_fds[0];
+    ffkx_error error = new_error();
+    CHECK_STATUS(FFKX_ERROR_UNSUPPORTED_MEDIA, ffkx_trim(&options, NULL, NULL, &error));
+    CHECK_STR("input cannot seek (pipe or stream)", error.message);
+    CHECK_I64(-ESPIPE, error.ffmpeg_error);
+    CHECK_I64(FFKX_SIDE_INPUT, error.side);
+    close(pipe_fds[0]);
+    close(pipe_fds[1]);
+}
+
+static void trim_edit_list(void) {
+    ffkx_trim_options options = trim_options(sample(AV), scratch("edit.mp4"), 2500000, 4500000);
+    options.flags = FFKX_TRIM_EDIT_LIST;
+    ffkx_trim_result result = new_trim_result();
+    CHECK_STATUS(FFKX_OK, ffkx_trim(&options, NULL, &result, NULL));
+    CHECK_I64(2000000, result.actual_start_us);
+
+    options.output_path = scratch("edit.mkv");
+    ffkx_error error = new_error();
+    CHECK_STATUS(FFKX_ERROR_UNSUPPORTED_MEDIA, ffkx_trim(&options, NULL, NULL, &error));
+    CHECK_STR("edit list mode needs an MP4 or MOV output", error.message);
+    CHECK_I64(FFKX_SIDE_OUTPUT, error.side);
+}
+
+/* Writes the first half of a sample: an MP4 whose moov atom (at the end) is missing. */
+static const char* truncated_sample(void) {
+    const char* path = scratch("truncated.mp4");
+    FILE* in = fopen(sample(AV), "rb");
+    FILE* out = fopen(path, "wb");
+    CHECK(in != NULL && out != NULL);
+    if (in == NULL || out == NULL) return path;
+    char buffer[4096];
+    long long remaining = file_size(sample(AV)) / 2;
+    size_t n;
+    while (remaining > 0 && (n = fread(buffer, 1, sizeof(buffer), in)) > 0) {
+        if ((long long)n > remaining) n = (size_t)remaining;
+        fwrite(buffer, 1, n, out);
+        remaining -= (long long)n;
+    }
+    fclose(in);
+    fclose(out);
+    return path;
+}
+
+static void trim_failures(void) {
+    ffkx_error error = new_error();
+
+    ffkx_trim_options options = trim_options(scratch("missing.mp4"), scratch("x.mp4"), 0, 1000000);
+    CHECK_STATUS(FFKX_ERROR_INPUT_NOT_FOUND, ffkx_trim(&options, NULL, NULL, &error));
+    CHECK_STATUS(FFKX_ERROR_INPUT_NOT_FOUND, error.status);
+    CHECK_I64(-ENOENT, error.ffmpeg_error);
+    CHECK_I64(FFKX_SIDE_INPUT, error.side);
+    CHECK_STR("open input failed: No such file or directory (-2)", error.message);
+
+    options = trim_options(sample(AV), scratch("late.mp4"), 10000000, FFKX_TIME_END);
+    CHECK_STATUS(FFKX_ERROR_RANGE_OUTSIDE_MEDIA, ffkx_trim(&options, NULL, NULL, &error));
+    CHECK_STR("start is at or beyond the end of the media", error.message);
+
+    options = trim_options(sample(AV), scratch("clip.xyz"), 0, 1000000);
+    CHECK_STATUS(FFKX_ERROR_UNSUPPORTED_MEDIA, ffkx_trim(&options, NULL, NULL, &error));
+    CHECK_I64(FFKX_SIDE_OUTPUT, error.side);
+    CHECK_STR("no container matches the output file extension", error.message);
+
+    options = trim_options(sample(AV), scratch("clip.mp3"), 0, 1000000);
+    CHECK_STATUS(FFKX_ERROR_UNSUPPORTED_MEDIA, ffkx_trim(&options, NULL, NULL, &error));
+    CHECK_I64(FFKX_SIDE_OUTPUT, error.side);
+
+    options = trim_options(sample(AV), scratch("missing-dir/clip.mp4"), 0, 1000000);
+    CHECK_STATUS(FFKX_ERROR_IO, ffkx_trim(&options, NULL, NULL, &error));
+    CHECK_I64(-ENOENT, error.ffmpeg_error);
+    CHECK_I64(FFKX_SIDE_OUTPUT, error.side);
+
+    ffkx_task* task = new_task(FFKX_LOG_ERROR, 10);
+    options = trim_options(truncated_sample(), scratch("truncated-out.mp4"), 0, 1000000);
+    CHECK_STATUS(FFKX_ERROR_INVALID_MEDIA, ffkx_trim(&options, task, NULL, &error));
+    CHECK_I64(FFMPEG_INVALIDDATA, error.ffmpeg_error);
+    CHECK(log_contains(task, "moov atom not found"));
+    ffkx_task_destroy(task);
+}
+
+static void trim_arguments(void) {
+    ffkx_error error = new_error();
+    ffkx_trim_options options = trim_options(NULL, scratch("args.mp4"), 0, 1000000);
+    options.input_fd = -1;
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_trim(&options, NULL, NULL, &error));
+    CHECK_STR("neither input_path nor input_fd is set", error.message);
+
+    /* An empty path names no file, as for open(). */
+    options = trim_options("", scratch("args.mp4"), 0, 1000000);
+    CHECK_STATUS(FFKX_ERROR_INPUT_NOT_FOUND, ffkx_trim(&options, NULL, NULL, &error));
+    options = trim_options(sample(AV), NULL, 0, 1000000);
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_trim(&options, NULL, NULL, &error));
+    options = trim_options(sample(AV), scratch("args.mp4"), -1, 1000000);
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_trim(&options, NULL, NULL, &error));
+    CHECK_STR("start_us is negative", error.message);
+    options = trim_options(sample(AV), scratch("args.mp4"), 1000000, 1000000);
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_trim(&options, NULL, NULL, &error));
+    CHECK_STR("end_us is not after start_us", error.message);
+    /* Zero-initialized options with only paths set: an empty range. */
+    options = trim_options(sample(AV), scratch("args.mp4"), 0, 0);
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_trim(&options, NULL, NULL, &error));
+    CHECK_I64(-1, file_size(scratch("args.mp4")));
+}
+
+/* ---- Split --------------------------------------------------------------------------------------- */
+
+static ffkx_split_options split_options(const char* directory, int64_t segment_us) {
+    ffkx_split_options options;
+    memset(&options, 0, sizeof(options));
+    options.struct_size = sizeof(options);
+    options.input_path = av_path;
+    options.output_directory = directory;
+    options.file_name_prefix = "clip-";
+    options.extension = "mp4";
+    options.segment_us = segment_us;
+    return options;
+}
+
+static const char* new_directory(const char* name) {
+    const char* path = scratch(name);
+    CHECK(mkdir(path, 0700) == 0);
+    return path;
+}
+
+static int entries_in(const char* directory) {
+    int count = 0;
+    char name[32];
+    for (int i = 1; i <= 20; ++i) {
+        snprintf(name, sizeof(name), "clip-%04d.mp4", i);
+        if (file_size(path_in(directory, name)) >= 0) ++count;
+    }
+    return count;
+}
+
+static void split_segments(void) {
+    const char* directory = new_directory("split");
+    ffkx_split_options options = split_options(directory, 3000000);
+    ffkx_task* task = new_task(FFKX_LOG_WARNING, 10);
+    ffkx_split_result* result = NULL;
+    ffkx_error error = new_error();
+    CHECK_STATUS(FFKX_OK, ffkx_split(&options, task, &result, &error));
+    /* Keyframes every second: cuts at 3, 6 and 9 s. */
+    const int64_t expected[][2] = {{0, 3000000}, {3000000, 6000000}, {6000000, 9000000}, {9000000, 10000000}};
+    CHECK_I64(4, ffkx_split_result_count(result));
+    for (uint32_t i = 0; i < 4 && i < ffkx_split_result_count(result); ++i) {
+        ffkx_segment segment;
+        memset(&segment, 0, sizeof(segment));
+        segment.struct_size = sizeof(segment);
+        CHECK_STATUS(FFKX_OK, ffkx_split_result_segment(result, i, &segment));
+        CHECK_I64(expected[i][0], segment.start_us);
+        CHECK_I64(expected[i][1], segment.end_us);
+    }
+    ffkx_segment segment;
+    memset(&segment, 0, sizeof(segment));
+    segment.struct_size = sizeof(segment);
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_split_result_segment(result, 4, &segment));
+    CHECK(file_size(path_in(directory, "clip-0001.mp4")) > 0);
+    CHECK(file_size(path_in(directory, "clip-0004.mp4")) > 0);
+    CHECK_I64(4, entries_in(directory));
+    const ffkx_progress progress = progress_of(task);
+    CHECK_I64(4, progress.segment);
+    CHECK_I64(10000000, progress.processed_us);
+    ffkx_split_result_free(result);
+    ffkx_task_destroy(task);
+
+    /* Without a prefix the names are just numbers; the result pointer may be NULL. */
+    directory = new_directory("split-plain");
+    options = split_options(directory, 5000000);
+    options.file_name_prefix = NULL;
+    CHECK_STATUS(FFKX_OK, ffkx_split(&options, NULL, NULL, NULL));
+    CHECK(file_size(path_in(directory, "0001.mp4")) > 0);
+    CHECK(file_size(path_in(directory, "0002.mp4")) > 0);
+
+    /* The longest segment length is one segment, also from an input whose start time is not 0. */
+    directory = new_directory("split-whole");
+    options = split_options(directory, INT64_MAX);
+    options.input_path = sample("av_offset.ts");
+    options.extension = "ts";
+    CHECK_STATUS(FFKX_OK, ffkx_split(&options, NULL, &result, NULL));
+    CHECK_I64(1, ffkx_split_result_count(result));
+    ffkx_split_result_free(result);
+}
+
+static void split_limits(void) {
+    const char* directory = new_directory("split-limits");
+    ffkx_split_result* result = (ffkx_split_result*)&result; /* must be reset to NULL */
+    ffkx_error error = new_error();
+
+    /* 10 s in 1 ms segments could need 10 001: refused before writing. */
+    ffkx_split_options options = split_options(directory, 1000);
+    CHECK_STATUS(FFKX_ERROR_TOO_MANY_SEGMENTS, ffkx_split(&options, NULL, &result, &error));
+    CHECK(result == NULL);
+    CHECK_I64(0, entries_in(directory));
+
+    options = split_options(directory, 3000000);
+    options.max_segments = 2;
+    CHECK_STATUS(FFKX_ERROR_TOO_MANY_SEGMENTS, ffkx_split(&options, NULL, &result, &error));
+    CHECK_I64(0, entries_in(directory));
+
+    options = split_options(directory, 0);
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_split(&options, NULL, &result, &error));
+    options = split_options(directory, 1000000);
+    options.max_segments = FFKX_MAX_SEGMENTS + 1;
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_split(&options, NULL, &result, &error));
+    options.max_segments = -1;
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_split(&options, NULL, &result, &error));
+    options = split_options(directory, 1000000);
+    options.extension = "m/p4";
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_split(&options, NULL, &result, &error));
+    options.extension = "";
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_split(&options, NULL, &result, &error));
+    options = split_options(directory, 1000000);
+    options.file_name_prefix = "../clip-";
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_split(&options, NULL, &result, &error));
+    CHECK_STR("file_name_prefix contains '/'", error.message);
+    options = split_options(NULL, 1000000);
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_split(&options, NULL, &result, &error));
+    CHECK_I64(0, entries_in(directory));
+
+    CHECK_I64(0, ffkx_split_result_count(NULL));
+    ffkx_split_result_free(NULL);
+}
+
+/* ---- Probe --------------------------------------------------------------------------------------- */
+
+static ffkx_media_info* probe_path(const char* path) {
+    ffkx_probe_options options;
+    memset(&options, 0, sizeof(options));
+    options.struct_size = sizeof(options);
+    options.input_path = path;
+    ffkx_media_info* info = NULL;
+    CHECK_STATUS(FFKX_OK, ffkx_probe(&options, NULL, &info, NULL));
+    return info;
+}
+
+static ffkx_format_info format_of(const ffkx_media_info* info) {
+    ffkx_format_info format;
+    memset(&format, 0, sizeof(format));
+    format.struct_size = sizeof(format);
+    CHECK_STATUS(FFKX_OK, ffkx_media_info_format(info, &format));
+    return format;
+}
+
+static ffkx_stream_info stream_of(const ffkx_media_info* info, uint32_t index) {
+    ffkx_stream_info stream;
+    memset(&stream, 0, sizeof(stream));
+    stream.struct_size = sizeof(stream);
+    CHECK_STATUS(FFKX_OK, ffkx_media_info_stream(info, index, &stream));
+    return stream;
+}
+
+static void probe_streams(void) {
+    ffkx_media_info* info = probe_path(sample(AV));
+    const ffkx_format_info format = format_of(info);
+    CHECK_STR("mov,mp4,m4a,3gp,3g2,mj2", format.format_name);
+    CHECK_I64(0, format.start_time_us);
+    CHECK_I64(10000000, format.duration_us);
+    CHECK_I64(267559, format.bit_rate);
+    CHECK_I64(2, format.stream_count);
+
+    const ffkx_stream_info video = stream_of(info, 0);
+    CHECK_I64(FFKX_MEDIA_TYPE_VIDEO, video.media_type);
+    CHECK_STR("h264", video.codec_name);
+    CHECK_I64(320, video.width);
+    CHECK_I64(240, video.height);
+    CHECK_I64(30, video.frame_rate_num);
+    CHECK_I64(1, video.frame_rate_den);
+    CHECK_I64(0, video.rotation);
+    CHECK_I64(0, video.flags);
+    CHECK_I64(FFKX_UNKNOWN, video.sample_rate);
+    CHECK(video.channel_layout == NULL);
+
+    const ffkx_stream_info audio = stream_of(info, 1);
+    CHECK_I64(FFKX_MEDIA_TYPE_AUDIO, audio.media_type);
+    CHECK_STR("aac", audio.codec_name);
+    CHECK_I64(44100, audio.sample_rate);
+    CHECK_I64(2, audio.channels);
+    CHECK_STR("stereo", audio.channel_layout);
+    CHECK_I64(10000000, audio.duration_us);
+    CHECK_I64(64216, audio.bit_rate);
+    CHECK_I64(FFKX_UNKNOWN, audio.width);
+    CHECK_I64(FFKX_UNKNOWN, audio.rotation);
+
+    ffkx_stream_info stream;
+    memset(&stream, 0, sizeof(stream));
+    stream.struct_size = sizeof(stream);
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_media_info_stream(info, 2, &stream));
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_media_info_format(info, NULL));
+    ffkx_media_info_free(info);
+    ffkx_media_info_free(NULL);
+}
+
+static void probe_samples(void) {
+    ffkx_media_info* info = probe_path(sample("video_h264_rotated.mp4"));
+    CHECK_I64(90, stream_of(info, 0).rotation);
+    ffkx_media_info_free(info);
+
+    /* ADTS: FFmpeg only estimates the duration from the bit rate. */
+    info = probe_path(sample("audio_aac.aac"));
+    const ffkx_format_info format = format_of(info);
+    CHECK_STR("aac", format.format_name);
+    CHECK_I64(FFKX_UNKNOWN, format.duration_us);
+    CHECK_I64(FFKX_UNKNOWN, stream_of(info, 0).duration_us);
+    ffkx_media_info_free(info);
+
+    /* A descriptor, and a NULL result pointer (only checks that the input opens). */
+    const int fd = open(sample(AV), O_RDONLY | O_CLOEXEC);
+    ffkx_probe_options options;
+    memset(&options, 0, sizeof(options));
+    options.struct_size = sizeof(options);
+    options.input_fd = fd;
+    info = NULL;
+    CHECK_STATUS(FFKX_OK, ffkx_probe(&options, NULL, &info, NULL));
+    CHECK_I64(2, format_of(info).stream_count);
+    ffkx_media_info_free(info);
+    CHECK_STATUS(FFKX_OK, ffkx_probe(&options, NULL, NULL, NULL));
+    close(fd);
+
+    ffkx_error error = new_error();
+    options.input_fd = -1;
+    options.input_path = scratch("missing.mp4");
+    info = (ffkx_media_info*)&info;
+    CHECK_STATUS(FFKX_ERROR_INPUT_NOT_FOUND, ffkx_probe(&options, NULL, &info, &error));
+    CHECK(info == NULL);
+}
+
+/* ---- Tasks, progress and logs -------------------------------------------------------------------- */
+
+static void task_progress(void) {
+    ffkx_task* task = new_task(FFKX_LOG_WARNING, 10);
+    ffkx_progress progress = progress_of(task);
+    CHECK_I64(0, progress.processed_us);
+    CHECK_I64(FFKX_UNKNOWN, progress.duration_us);
+    CHECK_I64(0, progress.bytes_written);
+
+    ffkx_trim_options options = trim_options(sample(AV), scratch("progress.mp4"), 2500000, 4500000);
+    CHECK_STATUS(FFKX_OK, ffkx_trim(&options, task, NULL, NULL));
+    progress = progress_of(task);
+    /* Target timeline: from the requested start to the requested end. */
+    CHECK_I64(2000000, progress.processed_us);
+    CHECK_I64(10000000, progress.duration_us);
+    CHECK(progress.bytes_written > 0);
+    const int64_t first_bytes = progress.bytes_written;
+
+    /* Counters add up over the task's operations; the segment is the caller's to set. */
+    ffkx_task_set_segment(task, 2);
+    options = trim_options(sample(AV), scratch("progress2.mp4"), 3000000, 4000000);
+    CHECK_STATUS(FFKX_OK, ffkx_trim(&options, task, NULL, NULL));
+    progress = progress_of(task);
+    CHECK_I64(3000000, progress.processed_us);
+    CHECK(progress.bytes_written > first_bytes);
+    CHECK_I64(2, progress.segment);
+    ffkx_task_destroy(task);
+}
+
+static void task_logs(void) {
+    /* Debug lines far outnumber the 5 kept: the latest are kept, the rest counted. */
+    ffkx_task* task = new_task(FFKX_LOG_DEBUG, 5);
+    ffkx_trim_options options = trim_options(sample(AV), scratch("logs.mp4"), 2000000, 4000000);
+    CHECK_STATUS(FFKX_OK, ffkx_trim(&options, task, NULL, NULL));
+    ffkx_log* log = NULL;
+    CHECK_STATUS(FFKX_OK, ffkx_task_log(task, &log));
+    CHECK_I64(5, ffkx_log_count(log));
+    CHECK(ffkx_log_dropped(log) > 0);
+    for (uint32_t i = 0; i < ffkx_log_count(log); ++i) {
+        ffkx_log_entry entry;
+        memset(&entry, 0, sizeof(entry));
+        entry.struct_size = sizeof(entry);
+        CHECK_STATUS(FFKX_OK, ffkx_log_entry_at(log, i, &entry));
+        CHECK(entry.level <= FFKX_LOG_DEBUG);
+        CHECK(entry.component != NULL && entry.message != NULL && entry.message[0] != '\0');
+        const size_t length = entry.message == NULL ? 0 : strlen(entry.message);
+        CHECK(length <= 1024 && (length == 0 || entry.message[length - 1] != '\n'));
+    }
+    ffkx_log_entry entry;
+    memset(&entry, 0, sizeof(entry));
+    entry.struct_size = sizeof(entry);
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_log_entry_at(log, 5, &entry));
+    ffkx_log_free(log);
+    ffkx_task_destroy(task);
+
+    /* A task that keeps nothing still counts. */
+    task = new_task(FFKX_LOG_DEBUG, 0);
+    CHECK_STATUS(FFKX_OK, ffkx_trim(&options, task, NULL, NULL));
+    CHECK_STATUS(FFKX_OK, ffkx_task_log(task, &log));
+    CHECK_I64(0, ffkx_log_count(log));
+    CHECK(ffkx_log_dropped(log) > 0);
+    ffkx_log_free(log);
+    ffkx_task_destroy(task);
+
+    CHECK_I64(0, ffkx_log_count(NULL));
+    CHECK_I64(0, ffkx_log_dropped(NULL));
+    ffkx_log_free(NULL);
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_task_log(NULL, &log));
+    CHECK(log == NULL);
+}
+
+/* ---- Cancellation and threads -------------------------------------------------------------------- */
+
+static void cancel_before_start(void) {
+    ffkx_task* task = new_task(FFKX_LOG_WARNING, 10);
+    CHECK_I64(0, ffkx_task_is_cancelled(task));
+    ffkx_task_cancel(task);
+    ffkx_task_cancel(task);
+    CHECK_I64(1, ffkx_task_is_cancelled(task));
+
+    const char* output = scratch("cancelled.mp4");
+    ffkx_trim_options options = trim_options(sample(AV), output, 0, 1000000);
+    ffkx_error error = new_error();
+    CHECK_STATUS(FFKX_ERROR_CANCELLED, ffkx_trim(&options, task, NULL, &error));
+    CHECK_STR("cancelled", error.message);
+    CHECK_I64(FFKX_SIDE_NONE, error.side);
+    CHECK_I64(-1, file_size(output));
+
+    ffkx_probe_options probe;
+    memset(&probe, 0, sizeof(probe));
+    probe.struct_size = sizeof(probe);
+    probe.input_path = sample(AV);
+    CHECK_STATUS(FFKX_ERROR_CANCELLED, ffkx_probe(&probe, task, NULL, NULL));
+    ffkx_task_destroy(task);
+
+    ffkx_task_cancel(NULL);
+    ffkx_task_set_segment(NULL, 1);
+    ffkx_task_destroy(NULL);
+    CHECK_I64(0, ffkx_task_is_cancelled(NULL));
+}
+
+/* Worker threads record what they saw; only the main thread checks. */
+struct split_run {
+    ffkx_task* task;
+    const char* directory;
+    ffkx_status status;
+    int has_result;
+    atomic_int done;
+};
+
+static void* run_split(void* argument) {
+    struct split_run* run = argument;
+    ffkx_split_options options = split_options(run->directory, 1000000);
+    ffkx_split_result* result = NULL;
+    run->status = ffkx_split(&options, run->task, &result, NULL);
+    run->has_result = result != NULL;
+    ffkx_split_result_free(result);
+    atomic_store(&run->done, 1);
+    return NULL;
+}
+
+/* Cancels a split from another thread once it is writing its second segment. The samples are small, so
+ * a run may end before that is seen; it is retried, and skipped if never seen. */
+static void cancel_while_running(void) {
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        char name[32];
+        snprintf(name, sizeof(name), "cancel-%d", attempt);
+        struct split_run run = {new_task(FFKX_LOG_WARNING, 10), new_directory(name), FFKX_OK, 0, 0};
+        pthread_t thread;
+        CHECK(pthread_create(&thread, NULL, run_split, &run) == 0);
+        int cancelled = 0;
+        while (!atomic_load(&run.done)) {
+            ffkx_progress progress;
+            memset(&progress, 0, sizeof(progress));
+            progress.struct_size = sizeof(progress);
+            ffkx_task_progress(run.task, &progress);
+            if (progress.segment >= 2) {
+                ffkx_task_cancel(run.task);
+                cancelled = 1;
+                break;
+            }
+            sched_yield();
+        }
+        pthread_join(thread, NULL);
+        ffkx_task_destroy(run.task);
+        if (cancelled && run.status == FFKX_ERROR_CANCELLED) {
+            CHECK(!run.has_result);
+            return;
+        }
+        CHECK_STATUS(FFKX_OK, run.status);
+        CHECK(run.has_result);
+    }
+    skip("every split finished before its second segment was seen");
+}
+
+struct parallel_trim {
+    int64_t start_us;
+    char output[512];
+    ffkx_status status;
+    ffkx_trim_result result;
+};
+
+static void* run_trim(void* argument) {
+    struct parallel_trim* trim = argument;
+    ffkx_task* task = NULL;
+    trim->status = ffkx_task_create(NULL, &task);
+    if (trim->status != FFKX_OK) return NULL;
+    ffkx_trim_options options = trim_options(av_path, trim->output, trim->start_us, trim->start_us + 1000000);
+    trim->result = new_trim_result();
+    trim->status = ffkx_trim(&options, task, &trim->result, NULL);
+    ffkx_task_destroy(task);
+    return NULL;
+}
+
+static void parallel_operations(void) {
+    struct parallel_trim trims[6];
+    pthread_t threads[6];
+    for (int i = 0; i < 6; ++i) {
+        trims[i].start_us = (int64_t)(i + 1) * 1000000;
+        snprintf(trims[i].output, sizeof(trims[i].output), "%s/parallel-%d.mp4", scratch_dir, i);
+        CHECK(pthread_create(&threads[i], NULL, run_trim, &trims[i]) == 0);
+    }
+    for (int i = 0; i < 6; ++i) {
+        pthread_join(threads[i], NULL);
+        CHECK_STATUS(FFKX_OK, trims[i].status);
+        /* Starts on a keyframe, so the start is exact. */
+        CHECK_I64(trims[i].start_us, trims[i].result.actual_start_us);
+    }
+}
+
+/* ---- Main ---------------------------------------------------------------------------------------- */
+
+int main(int argc, char** argv) {
+    if (argc != 3) {
+        fprintf(stderr, "usage: %s <media dir> <empty scratch dir>\n", argv[0]);
+        return 2;
+    }
+    media_dir = argv[1];
+    scratch_dir = argv[2];
+    snprintf(av_path, sizeof(av_path), "%s/%s", media_dir, AV);
+    printf("ffkx_capi_test: C ABI %u.%u, FFmpeg %s, %zu-bit\n", ffkx_abi_version() >> 16,
+           ffkx_abi_version() & 0xFFFFu, ffkx_ffmpeg_version(), P * 8);
+
+    run("versions", versions);
+    run("statuses", statuses);
+    run("options_versions", options_versions);
+    run("result_versions", result_versions);
+    run("task_options_versions", task_options_versions);
+    run("trim_from_path", trim_from_path);
+    run("trim_from_descriptor", trim_from_descriptor);
+    run("trim_edit_list", trim_edit_list);
+    run("trim_failures", trim_failures);
+    run("trim_arguments", trim_arguments);
+    run("split_segments", split_segments);
+    run("split_limits", split_limits);
+    run("probe_streams", probe_streams);
+    run("probe_samples", probe_samples);
+    run("task_progress", task_progress);
+    run("task_logs", task_logs);
+    run("cancel_before_start", cancel_before_start);
+    run("cancel_while_running", cancel_while_running);
+    run("parallel_operations", parallel_operations);
+
+    printf("ffkx_capi_test: %d checks, %d failed, %d skipped\n", checks, failures, skips);
+    return failures == 0 ? 0 : 1;
+}

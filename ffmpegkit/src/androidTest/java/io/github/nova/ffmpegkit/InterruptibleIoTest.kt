@@ -14,6 +14,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.time.Duration.Companion.days
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CoroutineScope
@@ -100,6 +101,17 @@ class InterruptibleIoTest {
     fun withoutATimeoutASlowReadStillSucceeds() {
         // Each read takes 400 ms, longer than the timeout used above; the default has no limit.
         val (descriptor, release) = stuckInput(hangAfterReads = Int.MAX_VALUE, delayMs = 400)
+        release.countDown()
+        val result = runBlocking { FFmpeg.trim(TrimRequest(MediaInput.of(descriptor), MediaOutput.of(File(dir, "clip.mp4")), TimeRange(2.seconds, 4.seconds))) }
+        assertEquals(TimeRange(2.seconds, 4.seconds), result.requestedRange)
+    }
+
+    @Test
+    fun aVeryLongTimeoutIsNoShorterThanItsLength() {
+        // 1,000 years in microseconds overflowed once converted to a nanosecond deadline, which made every
+        // read slower than the 20 ms poll interval time out.
+        FFmpeg.readTimeout = (1_000 * 365).days
+        val (descriptor, release) = stuckInput(hangAfterReads = Int.MAX_VALUE, delayMs = 100)
         release.countDown()
         val result = runBlocking { FFmpeg.trim(TrimRequest(MediaInput.of(descriptor), MediaOutput.of(File(dir, "clip.mp4")), TimeRange(2.seconds, 4.seconds))) }
         assertEquals(TimeRange(2.seconds, 4.seconds), result.requestedRange)

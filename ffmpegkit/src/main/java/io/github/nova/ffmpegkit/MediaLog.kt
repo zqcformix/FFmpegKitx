@@ -91,12 +91,12 @@ class MediaLog internal constructor(
     }
 }
 
-/** Built by log.cpp; the constructor signature is part of the JNI contract. Texts are UTF-8. */
+/** Built by jni/task.cpp from an `ffkx_log`; the constructor signature is part of the JNI contract. Texts are UTF-8. */
 internal class NativeLog(
     @JvmField val levels: IntArray,
     @JvmField val components: Array<ByteArray>,
     @JvmField val messages: Array<ByteArray>,
-    @JvmField val dropped: Int,
+    @JvmField val dropped: Long,
 ) {
     /** Decodes the entries (malformed UTF-8, e.g. cut at the size limit, becomes U+FFFD) and applies [redactions]. */
     fun toMediaLog(redactions: Redactions?): MediaLog = MediaLog(
@@ -105,7 +105,7 @@ internal class NativeLog(
             val message = String(messages[i], Charsets.UTF_8)
             MediaLog.Entry(MediaLog.Level.of(levels[i]), component, redactions?.apply(message) ?: message)
         },
-        dropped,
+        dropped.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
     )
 }
 

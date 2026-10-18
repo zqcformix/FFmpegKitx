@@ -1,10 +1,10 @@
 // FFmpeg log capture (roadmap 5.2). FFmpeg's log callback is global and does not know which task a
-// line belongs to, so each native call marks its thread with a LogScope: lines logged on that thread
-// while the scope lives go to the task's LogBuffer. Lines from other threads, or from calls without a
-// task, are engine logs and go to logcat (tag FFmpegKit, warnings and errors only).
+// line belongs to, so each operation marks its thread with a LogScope: lines logged on that thread
+// while the scope lives go to the task's LogBuffer. Lines from other threads, or from operations without
+// a task, are engine logs: warnings and errors go to logcat (tag FFmpegKit) on Android, else to stderr.
 #pragma once
 
-#include <jni.h>
+#include <cstdint>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -30,14 +30,14 @@ public:
     void Add(int level, std::string component, std::string message);
 
     // A copy of the entries, oldest first, and how many were dropped.
-    std::vector<LogEntry> Entries(int* dropped) const;
+    std::vector<LogEntry> Entries(int64_t* dropped) const;
 
 private:
     const int level_;
     const int max_entries_;
     mutable std::mutex mutex_;
     std::deque<LogEntry> entries_;
-    int dropped_ = 0;
+    int64_t dropped_ = 0;
 };
 
 // Routes FFmpeg logs from the current thread to `buffer` (null: engine logs) until destroyed.
@@ -52,7 +52,7 @@ private:
     LogBuffer* const previous_;
 };
 
-// Builds a NativeLog for Kotlin. Texts cross JNI as UTF-8 bytes: FFmpeg's text is not modified UTF-8.
-jobject LogToJava(JNIEnv* env, const LogBuffer& buffer);
+// Installs the log callback; called once when the library is loaded, before any FFmpeg call can log.
+void InstallLogCallback();
 
 }  // namespace remux

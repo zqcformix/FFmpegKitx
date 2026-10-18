@@ -40,6 +40,22 @@ class PackagedErrorsTest {
     }
 
     @Test
+    fun kotlinStatusesMatchTheCAbiHeader() {
+        assertArrayEquals(NativeStatus.all.toIntArray(), NativeErrors.statuses())
+    }
+
+    @Test
+    fun coreClassifiesFfmpegErrorsAsKotlinDoes() {
+        // Native failures arrive classified by the core; Java I/O failures by AvError. Both must agree.
+        for (code in AvError.all) {
+            for (role in MediaRole.entries) {
+                val status = NativeErrors.statusOf(code, role == MediaRole.OUTPUT)
+                assertEquals("$code on $role", AvError.reasonOf(code, role), NativeStatus.reasonOf(status))
+            }
+        }
+    }
+
+    @Test
     fun describesErrorsWithFfmpegText() {
         assertEquals("Invalid data found when processing input", NativeErrors.describe(AvError.INVALIDDATA))
         assertEquals("No such file or directory", NativeErrors.describe(AvError.ENOENT))

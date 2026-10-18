@@ -1,7 +1,9 @@
 // Imported rather than fully qualified: AGP 9 registers a `java` extension that shadows the `java.*` packages.
+import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.zip.ZipFile
+import javax.inject.Inject
 
 plugins {
     alias(libs.plugins.android.library)
@@ -162,4 +164,69 @@ val verifyNativeAlignment = tasks.register("verifyNativeAlignment") {
 
 tasks.withType<AbstractPublishToMaven>().configureEach {
     dependsOn(verifyNativeAlignment)
+}
+
+/**
+ * Runs the C ABI test program (src/main/cpp/test/capi_test.c) on the device adb picks (set ANDROID_SERIAL
+ * to choose), next to the libraries it was linked with, against the androidTest media samples. Uses the
+ * device's primary ABI, or `-PcapiTestAbi=armeabi-v7a` for a 32-bit run on a 64-bit device.
+ */
+abstract class ConnectedCapiTest @Inject constructor(private val execOperations: ExecOperations) : DefaultTask() {
+    @get:Internal
+    abstract val adb: RegularFileProperty
+
+    /** AGP's native build output (intermediates/cxx/Debug), one directory per build configuration and ABI. */
+    @get:Internal
+    abstract val nativeOutputs: DirectoryProperty
+
+    @get:Internal
+    abstract val media: DirectoryProperty
+
+    @get:Internal
+    abstract val abi: Property<String>
+
+    @TaskAction
+    fun run() {
+        val abi = abi.orNull ?: adb("shell", "getprop", "ro.product.cpu.abi").output.trim()
+        val program = nativeOutputs.get().asFile.walk()
+            .filter { it.name == "ffkx_capi_test" && it.parentFile.name == abi }
+            .maxByOrNull { it.lastModified() }
+            ?: throw GradleException("No ffkx_capi_test built for $abi")
+        val files = program.parentFile.listFiles { file -> file.name.endsWith(".so") }!!.map { it.path } + program.path
+        val dir = "/data/local/tmp/ffkx-capi-test"
+        adb("shell", "rm -rf $dir && mkdir -p $dir/media $dir/scratch").check()
+        adb("push", *files.toTypedArray(), "$dir/").check()
+        adb("push", *media.get().asFile.listFiles()!!.map { it.path }.toTypedArray(), "$dir/media/").check()
+        val run = adb("shell", "cd $dir && chmod 755 ffkx_capi_test && LD_LIBRARY_PATH=. ./ffkx_capi_test media scratch")
+        logger.lifecycle("${program.path} on $abi:\n${run.output}")
+        if (run.exitValue != 0) throw GradleException("ffkx_capi_test failed on $abi (exit ${run.exitValue}); files kept in $dir")
+        adb("shell", "rm -rf $dir").check()
+    }
+
+    private class Result(val command: String, val exitValue: Int, val output: String) {
+        fun check() {
+            if (exitValue != 0) throw GradleException("$command failed (exit $exitValue):\n$output")
+        }
+    }
+
+    private fun adb(vararg args: String): Result {
+        val output = ByteArrayOutputStream()
+        val result = execOperations.exec {
+            commandLine(adb.get().asFile.path, *args)
+            standardOutput = output
+            errorOutput = output
+            isIgnoreExitValue = true
+        }
+        return Result("adb ${args.first()}", result.exitValue, output.toString(Charsets.UTF_8))
+    }
+}
+
+tasks.register<ConnectedCapiTest>("connectedCapiTest") {
+    group = "verification"
+    description = "Runs the C ABI test program on the connected device or emulator."
+    dependsOn("externalNativeBuildDebug")
+    adb.set(androidComponents.sdkComponents.adb)
+    nativeOutputs.set(layout.buildDirectory.dir("intermediates/cxx/Debug"))
+    media.set(layout.projectDirectory.dir("src/androidTest/assets/media"))
+    abi.set(providers.gradleProperty("capiTestAbi"))
 }

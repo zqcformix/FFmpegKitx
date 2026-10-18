@@ -21,7 +21,7 @@ import kotlinx.coroutines.withContext
  * passes [nativeHandle] to native calls; [NativeTask] is the real one, host tests use fakes.
  */
 internal interface Task : Closeable {
-    /** The remux::Task handle to pass to native functions; 0 for none. */
+    /** The `ffkx_task` handle to pass to native functions; 0 for none. */
     val nativeHandle: Long
 
     val isCancelled: Boolean
@@ -58,7 +58,7 @@ internal interface Task : Closeable {
     }
 }
 
-/** A snapshot of remux::Task's counters (see remux.h) and of the task's [DeliveryMeter]. */
+/** A snapshot of the native task's counters (`ffkx_progress`) and of the task's [DeliveryMeter]. */
 internal class TaskProgress(
     /** Media time written on the operation's target timeline, summed over its native calls. */
     val processedUs: Long,
@@ -72,9 +72,9 @@ internal class TaskProgress(
 )
 
 /**
- * A remux::Task shared with native code. Native work polls the cancellation flag through FFmpeg's
- * interrupt callback and between packets, then stops and cleans up; it writes the progress counters
- * as it goes.
+ * An `ffkx_task` of the C ABI (include/ffmpegkitx.h) shared with native code. Native work polls the
+ * cancellation flag through FFmpeg's interrupt callback and between packets, then stops and cleans up;
+ * it writes the progress counters as it goes.
  */
 internal class NativeTask(
     private val logOptions: MediaLog.Options = FFmpeg.logOptions,
@@ -174,7 +174,7 @@ internal class NativeTask(
         @JvmStatic
         private external fun cancel(handle: Long)
 
-        /** Fills [out] with processed_us, duration_us (-1: unknown), bytes_written, segment. */
+        /** Fills [out] with processed_us, duration_us (FFKX_UNKNOWN, negative: unknown), bytes_written, segment. */
         @JvmStatic
         private external fun progress(handle: Long, out: LongArray)
 
