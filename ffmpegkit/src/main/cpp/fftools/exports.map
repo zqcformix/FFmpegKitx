@@ -1,0 +1,8 @@
+/* libffmpegkitx_cli exports ffkx_fftools_run and nothing else: fftools globals such as input_files stay
+   inside, so they cannot clash with an app that links FFmpeg tools of its own. */
+{
+  global:
+    ffkx_fftools_run;
+  local:
+    *;
+};

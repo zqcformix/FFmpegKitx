@@ -132,6 +132,28 @@ Java_io_github_nova_ffmpegkit_NativeSplit_split(JNIEnv* env, jobject /* this */,
     return ToStatus(env, error, times);
 }
 
+// Runs ffmpeg with [arguments], each UTF-8 bytes; see ffkx_execute.
+extern "C" JNIEXPORT jobject JNICALL
+Java_io_github_nova_ffmpegkit_NativeCommand_execute(JNIEnv* env, jclass /* clazz */, jobjectArray arguments, jlong task) {
+    const jsize count = env->GetArrayLength(arguments);
+    std::vector<std::string> values;
+    values.reserve(static_cast<size_t>(count));
+    for (jsize i = 0; i < count; ++i) {
+        auto bytes = static_cast<jbyteArray>(env->GetObjectArrayElement(arguments, i));
+        values.push_back(ToUtf8Path(env, bytes));
+        env->DeleteLocalRef(bytes);
+    }
+    std::vector<const char*> pointers;
+    for (const std::string& value : values) pointers.push_back(value.c_str());
+    ffkx_execute_options options{};
+    options.struct_size = sizeof(options);
+    options.argument_count = count;
+    options.arguments = pointers.data();
+    ffkx_error error = NewError();
+    ffkx_execute(&options, reinterpret_cast<ffkx_task*>(task), &error);
+    return ToStatus(env, error, {});
+}
+
 // Result layout, parsed by Prober.kt (NativeProbeResult). Unknown numbers are FFKX_UNKNOWN (Long.MIN_VALUE).
 //   numbers: start_time_us, duration_us, bit_rate,
 //     then per stream: media_type (FFKX_MEDIA_TYPE_*), flags (FFKX_STREAM_*), duration_us, bit_rate, width,

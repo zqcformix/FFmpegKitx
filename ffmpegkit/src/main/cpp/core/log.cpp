@@ -1,5 +1,6 @@
 #include "log.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
@@ -108,15 +109,30 @@ void Callback(void* avcl, int level, const char* fmt, va_list vl) {
     char chunk[LogBuffer::kMaxMessageBytes];
     va_list copy;
     va_copy(copy, vl);
-    vsnprintf(chunk, sizeof(chunk), fmt, copy);
+    const int length = vsnprintf(chunk, sizeof(chunk), fmt, copy);
     va_end(copy);
+    if (length < 0) return;
     if (log.pending.empty()) {
         log.pending_level = level;
         log.pending_component = Component(avcl);
     }
     if (log.pending.size() < LogBuffer::kMaxMessageBytes) log.pending.append(chunk);
     if (log.pending.size() > LogBuffer::kMaxMessageBytes) log.pending.resize(LogBuffer::kMaxMessageBytes);
-    if (!log.pending.empty() && log.pending.back() == '\n') Flush(log);
+    // Whether this chunk ends the line: decided on the whole chunk, since what is kept of it may be cut,
+    // and a cut line must still end, or it would swallow every later line of the thread. A carriage
+    // return also ends a line: ffmpeg's statistics line is rewritten in place that way.
+    const auto ends_line = [](char c) { return c == '\n' || c == '\r'; };
+    char last = length > 0 ? chunk[std::min<size_t>(length, sizeof(chunk) - 1) - 1] : '\0';
+    if (static_cast<size_t>(length) >= sizeof(chunk)) {
+        // Cut: the end is in the part that did not fit (rare: format it whole once more to see it).
+        std::string whole(static_cast<size_t>(length) + 1, '\0');
+        va_list again;
+        va_copy(again, vl);
+        vsnprintf(whole.data(), whole.size(), fmt, again);
+        va_end(again);
+        last = whole[static_cast<size_t>(length) - 1];
+    }
+    if (ends_line(last)) Flush(log);
 }
 
 }  // namespace

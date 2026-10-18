@@ -100,6 +100,8 @@ Google Play 自 2025-11-01 起要求面向 Android 15+ 的新应用和更新支�
 
 发布说明须写明：AAR 每个 ABI 多一个 `libffmpegkitx_core.so`（可移植核心与 C ABI，路线图 6.1），由 `libffmpegkit.so` 加载，应用不需要改动。arm64-v8a 上两者合计约 585 KB，`v1.1.0` 的 `libffmpegkit.so` 为 378 KB，增加部分主要是两个库各带一份静态 C++ 运行时。C ABI 头文件不随 AAR 分发。
 
+另需写明：新增 `FFmpeg.execute`（路线图 6.3），命令行引擎是每个 ABI 多出的 `libffmpegkitx_cli.so`，release 构建 arm64-v8a 386 KB、armeabi-v7a 292 KB、x86_64 403 KB。它由 FFmpeg 的 fftools 构建，许可为 LGPL-2.1+，README 的许可一节要同时说明（第三方声明已更新）。还要写明 `execute` 与 trim/split 的差异，见 [Android 编辑 API](ANDROID_API.zh-CN.md) 第 9 节。
+
 ### v1.1.0（首个编辑版本，路线图 4.4）
 
 - **内容**：编辑 API——`FFmpeg.trim`（含 `TrimMode.EDIT_LIST`）、`FFmpeg.split`（`SplitRequest.byDuration`/`byRanges`）、`FFmpeg.probe`，`File`/`Uri` 扩展，`MediaInput`/`MediaOutput`，`FFmpegException`；行为与限制见 [Android 编辑 API 设计](ANDROID_API.zh-CN.md)。信息查询 API 不变。预编译 FFmpeg `.so` 与 v1.0.3 相同，第三方声明不变。

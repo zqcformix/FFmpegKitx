@@ -1,6 +1,6 @@
 # Android 编辑 API 设计（M1 草案）
 
-> **状态：已随 `v1.1.0` 发布（2026-10-18）。** 已实现：`FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`、`TrimRequest`（含 `TrimMode`）、`SplitRequest.byDuration`/`byRanges`、`MediaInput`/`MediaOutput`、`File`/`Uri` 的 `trimTo`/`splitTo`/`probe` 扩展、`MediaInfo`/`StreamInfo`、`TimeRange`、`FFmpegException`，以及第 3、4、7、8 节的行为和协程取消。**v1.1.0 之后（未发布）**：第 5 节的进度回调 `onProgress`/`MediaProgress`、任务日志 `MediaLog`（路线图 5.2）、内部会话状态机（5.1），可中断读取、`FFmpeg.readTimeout`、交付复制阶段的取消与"抛出即不留输出"（5.3），以及并发上限与缓冲预算 `FFmpeg.limits`（5.4）。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
+> **状态：已随 `v1.1.0` 发布（2026-10-18）。** 已实现：`FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`、`TrimRequest`（含 `TrimMode`）、`SplitRequest.byDuration`/`byRanges`、`MediaInput`/`MediaOutput`、`File`/`Uri` 的 `trimTo`/`splitTo`/`probe` 扩展、`MediaInfo`/`StreamInfo`、`TimeRange`、`FFmpegException`，以及第 3、4、7、8 节的行为和协程取消。**v1.1.0 之后（未发布）**：第 5 节的进度回调 `onProgress`/`MediaProgress`、任务日志 `MediaLog`（路线图 5.2）、内部会话状态机（5.1），可中断读取、`FFmpeg.readTimeout`、交付复制阶段的取消与"抛出即不留输出"（5.3），以及并发上限与缓冲预算 `FFmpeg.limits`（5.4）；第 9 节的命令行 `FFmpeg.execute`（6.3）。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
 
 本文是 M1 范围、行为与限制的唯一出处；其他文档只引用，不复述。
 
@@ -234,3 +234,33 @@ suspend fun describe(context: Context, uri: Uri) {
 - **缺失值为 `null`，不伪造为零**。数值与同版本 ffprobe 一致，但有一处刻意不同：FFmpeg 只能按码率估算的时长（ADTS AAC 等裸流，ffprobe 会提示 "Estimating duration from bitrate"）报为 `null`，因为估算值可能偏差明显（测试样本实际 10 s，估算为 10.1 s）。裸 H.264 等没有时间信息的流，`startTime`、`duration`、`bitRate` 均为 `null`；其 `frameRate` 可能是解封装器的默认值（H.264 裸流为 25），与 ffprobe 相同。
 - `rotation` 是显示时需要**顺时针**旋转的角度，取值 `0 until 360`，与 Android `MediaFormat.KEY_ROTATION`、`MediaMetadataRetriever` 的旋转值一致；ffprobe 的 `rotation` 是逆时针角度，符号相反（ffprobe 的 `-90` 对应这里的 `90`）。没有显示矩阵时为 0，矩阵不是纯旋转时为 `null`。
 - 探测只读取文件开头（FFmpeg 默认最多约 5 MB、5 s 的数据）以及容器索引，通常很快；对时长未知的输入，trim/split 照常执行。
+
+## 9. 命令行（路线图 6.3，未发布）
+
+```kotlin
+FFmpeg.execute(listOf("-i", input.path, "-vf", "scale=640:-2", "-c:a", "copy", output.path))
+FFmpeg.execute(arguments) { progress -> /* processed、bytesWritten；fraction 结束前为 null */ }
+FFmpeg.execute("-i", input.path, output.path) // vararg 形式
+```
+
+- 在应用进程内运行 FFmpeg 8.0.1 的 `ffmpeg` 命令行，引擎是独立的 `libffmpegkitx_cli.so`。它由 FFmpeg 的 fftools 构建，许可为 LGPL-2.1+，首次调用时加载。
+- **参数**：每个元素就是一个参数，原样传入，没有 shell，因此不切分、不去引号、不展开，路径无需转义。含 NUL 字符的参数抛 `IllegalArgumentException`。
+- **成功**：ffmpeg 返回 0 时得到 `ExecuteResult`，它的 `log` 包含 ffmpeg 主线程和工作线程写的日志。
+
+**与 trim/split/probe 的差异**：命令行比编辑操作低一层，下面几项保护在这里都不生效。计划在路线图 12.5 中收窄这些差异：参数可以引用 `MediaInput`/`MediaOutput`，失败时撤回输出。
+
+| 方面 | trim / split / probe | execute |
+| --- | --- | --- |
+| 输出写入 | 先写临时文件，成功后不覆盖地发布；失败或取消时撤回 | ffmpeg 直接打开并写入参数里的输出，没有临时文件；失败或取消可能留下写了一半的文件 |
+| 已有输出 | 永不覆盖（`OUTPUT_EXISTS`） | 主输出文件不带 `-y` 时报 `OUTPUT_EXISTS`（ffmpeg 原本会以退出码 0 结束，这里改成了错误），带 `-y` 则覆盖；image2 序列、segment/hls/dash/tee 等 muxer 写的文件，以及 `-sdp_file`、`-vstats_file`、`-passlogfile`、`-progress` 的文件，不检查直接覆盖 |
+| 输入来源 | `File`、`content://` Uri、`ParcelFileDescriptor`，读取可中断、可设超时 | 只认 ffmpeg 能打开的地址：文件路径或协议。Uri 的做法是自己打开 `ParcelFileDescriptor`、调用期间保持打开，再传 `-fd <fd> -i fd:`；这种读取不受 `readTimeout` 约束 |
+| 取消 | 立即停止，不留输出 | 约 100 ms 内生效：输入立即停止读取，打开输入输出期间的 I/O 被中断；转码开始后像按下 `q`，已写的部分收尾后保留，收尾卡住时 3 s 后也中断。以 `CancellationException` 结束。阻塞在内核里的读取（卡住的管道、`fd:` 背后的提供方）要等它返回 |
+| 并行 | 最多 `limits.maxConcurrentOperations` 个同时运行 | 也占这个额度；此外进程内同一时刻只运行一条命令（fftools 用全局变量保存状态），其余排队，排队中可取消 |
+
+- **拒绝的选项**：会改变整个进程、或打印帮助后退出的选项，在执行任何操作之前抛 `IllegalArgumentException`。包括 `-report`、`-cpuflags`、`-cpucount`、`-max_alloc`、`-timelimit`（它会限制整个应用的 CPU 时间，超限时 SIGXCPU 会结束应用）、`-stdin`，以及 `-h`、`-version`、`-buildconf`、`-formats` 等列表类选项。`FFREPORT` 环境变量被忽略。没有 stdin，也不安装信号处理。
+- **日志**：`-loglevel`/`-v` 只在命令运行期间改变 FFmpeg 的全局日志级别，结束后恢复。`ExecuteResult.log` 的级别和条数按 `FFmpeg.logOptions`。以 `/` 或 `file:` 开头的完整参数在日志中显示为 `<path>`；滤镜参数内嵌的路径不会被脱敏。编解码器和滤镜内部线程写的日志属于引擎日志。
+- **失败**：
+  - ffmpeg 返回 FFmpeg 错误码时，按第 6 节的表归类为 `FFmpegException`，例如输入不存在得到 `INPUT_NOT_FOUND`，消息形如 "ffmpeg failed: No such file or directory (-2)"。命令不区分输入侧和输出侧：输出目录不存在同样归为 `INPUT_NOT_FOUND`。
+  - 其他非零退出码（1、69、255）为 `NATIVE`，消息为 "ffmpeg exited with code N"。
+  - 两种情况下 `e.log` 都带着 ffmpeg 的日志。
+- **进度**：`processed` 是已写出的输出时长，`bytesWritten` 是第一个输出的大小，约每 0.5 s 更新一次。总时长未知，`fraction` 在结束前一直为 `null`，结束时为 1.0。
