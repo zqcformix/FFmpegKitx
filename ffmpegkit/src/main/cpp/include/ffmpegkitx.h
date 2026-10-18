@@ -21,17 +21,30 @@
  * - A struct the library fills (results) is filled up to your struct_size; bytes beyond what the
  *   library knows are set to zero. struct_size itself is not changed.
  *
- * Threads
- * - ffkx_trim, ffkx_split and ffkx_probe block the calling thread until done. Nothing calls back.
- * - A task serves one operation at a time; operations with different tasks may run at the same time.
- *   While an operation runs, any thread may call ffkx_task_cancel, ffkx_task_is_cancelled,
- *   ffkx_task_progress, ffkx_task_set_segment and ffkx_task_log on its task. Destroy a task only
- *   after its last operation has returned.
- * - Result objects (ffkx_log, ffkx_split_result, ffkx_media_info) never change; any thread may read them.
+ * Threads and lifetimes (roadmap 6.2)
+ * - The library calls back into the caller only through the engine log sink (ffkx_set_engine_log_sink).
+ *   A task's progress, log and cancellation are read and set by the caller instead, from any thread:
+ *   poll ffkx_task_progress to report progress. So no task callback can outlive its task.
+ * - ffkx_trim, ffkx_split and ffkx_probe block the calling thread until done. Operations with different
+ *   tasks, or none, may run at the same time. A task runs one operation at a time: starting another
+ *   while one runs fails with FFKX_ERROR_INVALID_ARGUMENT. Every other function taking a task may be
+ *   called from any thread at any time, also while an operation runs with it.
+ * - Tasks are reference counted. ffkx_task_create returns one reference, ffkx_task_retain adds one and
+ *   ffkx_task_release drops one; the last release frees the task. A thread may use a task only while it
+ *   holds a reference no other thread releases: retain before handing a task to another thread, which
+ *   releases it when done. Releasing never cancels; cancel first if the work is no longer wanted.
+ * - Result objects (ffkx_log, ffkx_split_result, ffkx_media_info) never change: any number of threads
+ *   may read one at the same time. Free each exactly once, after every thread has finished with it; its
+ *   strings go with it.
+ * - Threads the library starts: one per input read from a descriptor, ending when the operation closes
+ *   the input or, after a read was abandoned (cancellation, timeout), when that read finally returns.
+ *   They never call back. Because of them and of FFmpeg's log callback, the library must stay loaded
+ *   until the process ends.
  *
  * FFmpeg logs: loading the library installs FFmpeg's process-wide log callback. Lines an operation logs
- * on its own thread go to its task's log (ffkx_task_log); all other lines are engine logs, written to
- * logcat (tag FFmpegKit) on Android and to stderr elsewhere, warnings and errors only.
+ * on its own thread go to its task's log (ffkx_task_log); all other lines are engine logs, which go to
+ * the engine log sink: by default logcat (tag FFmpegKit) on Android and stderr elsewhere, warnings and
+ * errors only.
  *
  * Changing this header: from version 1.0 on, only append functions, constants and struct fields. A new
  * field starts at or after the struct's previous sizeof on every ABI, and zero must keep the previous
@@ -60,7 +73,7 @@ extern "C" {
 /* ---- Versions ---------------------------------------------------------------------------------- */
 
 #define FFKX_ABI_VERSION_MAJOR 0
-#define FFKX_ABI_VERSION_MINOR 1
+#define FFKX_ABI_VERSION_MINOR 2
 
 /* The loaded library's ABI version: (major << 16) | minor. */
 FFKX_API uint32_t ffkx_abi_version(void);
@@ -192,11 +205,15 @@ typedef struct ffkx_task_options {
     int64_t max_buffered_bytes;
 } ffkx_task_options;
 
-/* Creates a task; options may be NULL for all defaults. On failure *task is NULL. */
+/* Creates a task holding one reference; options may be NULL for all defaults. On failure *task is NULL. */
 FFKX_API ffkx_status ffkx_task_create(const ffkx_task_options* options, ffkx_task** task);
 
-/* Frees the task; NULL is ignored. Never while an operation uses it. */
-FFKX_API void ffkx_task_destroy(ffkx_task* task);
+/* Adds a reference and returns the task; NULL is returned as is. */
+FFKX_API ffkx_task* ffkx_task_retain(ffkx_task* task);
+
+/* Drops a reference; the last one frees the task. Also while an operation runs with the task on another
+ * thread, as long as that thread holds its own reference. NULL is ignored. */
+FFKX_API void ffkx_task_release(ffkx_task* task);
 
 /* Asks the task's operation to stop: it fails with FFKX_ERROR_CANCELLED soon after, and every later
  * operation with this task fails at once. Reads stuck in an input descriptor are abandoned. */
@@ -245,6 +262,45 @@ FFKX_API uint32_t ffkx_log_count(const ffkx_log* log);
 FFKX_API uint64_t ffkx_log_dropped(const ffkx_log* log);
 FFKX_API ffkx_status ffkx_log_entry_at(const ffkx_log* log, uint32_t index, ffkx_log_entry* entry);
 FFKX_API void ffkx_log_free(ffkx_log* log);
+
+/* ---- Engine logs ------------------------------------------------------------------------------- */
+
+/* One complete line: as in ffkx_log_entry, the component is "" if none and the message has no trailing
+ * newline and at most 1,024 bytes. The strings are valid only during the call. */
+typedef void (*ffkx_log_callback)(void* user_data, int32_t level, const char* component, const char* message);
+
+typedef struct ffkx_engine_log_sink {
+    uint32_t struct_size;
+    /* FFKX_LOG_*: lines at most this severe are passed (zero: FFKX_LOG_PANIC). */
+    int32_t level;
+    /* Required. */
+    ffkx_log_callback callback;
+    void* user_data;
+    /* Called exactly once with user_data, after the last call of callback with it has returned, once
+     * the sink has been replaced. May be NULL. Never called at process exit. */
+    void (*release)(void* user_data);
+} ffkx_engine_log_sink;
+
+/*
+ * Sends engine logs (FFmpeg lines logged outside any task's operation, e.g. by operations without a
+ * task) to `sink`, or back to the default sink when `sink` is NULL. Process-wide; the library copies
+ * the struct.
+ *
+ * - The callback runs on the thread FFmpeg logged on: any thread, several at the same time, so it must
+ *   be thread-safe. Lines from one thread arrive in order. It must return normally: no C++ exception
+ *   or longjmp may leave it or release, since FFmpeg's C code is on the stack.
+ * - In the callback and in release, do not call FFmpeg: lines it logs there are dropped. Operations
+ *   started there fail with FFKX_ERROR_INVALID_ARGUMENT. Calling ffkx_set_engine_log_sink is allowed
+ *   and takes effect for later lines.
+ * - Returns without waiting for threads that are still in the previous sink's callback. Its release
+ *   runs when the last of them returns, on that thread, or before this function returns, on this
+ *   thread, when none was in it. A line logged while the sink changes goes to the old or the new sink,
+ *   never both.
+ * - On any failure (FFKX_ERROR_INVALID_ARGUMENT for a missing callback or a bad struct_size, or
+ *   FFKX_ERROR_UNSUPPORTED_VERSION, or FFKX_ERROR_OUT_OF_MEMORY) the sink is not installed and its
+ *   release is not called.
+ */
+FFKX_API ffkx_status ffkx_set_engine_log_sink(const ffkx_engine_log_sink* sink);
 
 /* ---- Operations -------------------------------------------------------------------------------- */
 /*

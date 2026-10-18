@@ -1,4 +1,4 @@
-// JNI for NativeTask: a NativeTask handle is an ffkx_task pointer.
+// JNI for NativeTask: a NativeTask handle is an ffkx_task pointer holding the one reference NativeTask owns.
 #include <jni.h>
 #include <cstring>
 
@@ -106,5 +106,5 @@ Java_io_github_nova_ffmpegkit_NativeTask_setSegment(JNIEnv* /* env */, jclass /*
 
 extern "C" JNIEXPORT void JNICALL
 Java_io_github_nova_ffmpegkit_NativeTask_destroy(JNIEnv* /* env */, jclass /* clazz */, jlong handle) {
-    ffkx_task_destroy(TaskOf(handle));
+    ffkx_task_release(TaskOf(handle));
 }

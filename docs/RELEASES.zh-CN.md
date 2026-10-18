@@ -30,7 +30,7 @@
    .\gradlew.bat :ffmpegkit:publishToMavenLocal
    ```
 
-   `publishToMavenLocal` 只生成本地内容，不等于发布远端包。所有 Maven 发布任务都会先运行 `verifyNativeAlignment`，JitPack 构建也一样。设备侧验证库加载、真实剪辑与分割、异常路径、长任务资源释放和最低支持版本；C ABI 测试程序用 `:ffmpegkit:connectedCapiTest` 在设备上运行（64 位设备加 `-PcapiTestAbi=armeabi-v7a` 再跑一次 32 位）。
+   `publishToMavenLocal` 只生成本地内容，不等于发布远端包。所有 Maven 发布任务都会先运行 `verifyNativeAlignment`，JitPack 构建也一样。设备侧验证库加载、真实剪辑与分割、异常路径、长任务资源释放和最低支持版本；C ABI 测试程序用 `:ffmpegkit:connectedCapiTest` 在设备上运行（64 位设备加 `-PcapiTestAbi=armeabi-v7a` 再跑一次 32 位，加 `-PcapiTestAsan` 再跑一次 ASan 构建）。
 3. **产物记录**：计算 SHA-256；生成组件清单或 SPDX/CycloneDX SBOM；保留原始构建日志、构建配置、工具链版本和来源定位。
 4. **消费者验证**：在空白消费者工程中用拟发布坐标构建；检查传递依赖、R8/ProGuard、打包后的 `.so`、sources/Javadoc 和 POM。消费者工程须用 Kotlin 并采用新建工程的默认配置（当前为 AGP 9 内置 Kotlin），Java 工程发现不了 Kotlin 元数据版本过新之类的问题（见第 6 节）。
 5. **发布说明**：写清新增 API、行为变化、兼容性、限制、迁移示例和验证范围。签名与凭据由发布环境安全注入。
