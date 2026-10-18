@@ -75,12 +75,15 @@ struct Source {
 // and cleans up as usual. The worker writes the progress counters and Kotlin polls them from another
 // thread, so every field is atomic; each has a single writer.
 struct Task {
-    explicit Task(int log_level = AV_LOG_WARNING, int max_log_entries = 0, int64_t read_timeout_us = 0)
-        : read_timeout_us(read_timeout_us), log(log_level, max_log_entries) {}
+    explicit Task(int log_level = AV_LOG_WARNING, int max_log_entries = 0, int64_t read_timeout_us = 0,
+                  int64_t max_buffered_bytes = 0)
+        : read_timeout_us(read_timeout_us), max_buffered_bytes(max_buffered_bytes), log(log_level, max_log_entries) {}
 
     std::atomic<bool> cancelled{false};
     // A descriptor read that takes longer fails with AVERROR(ETIMEDOUT); 0: no limit (FdReader).
     std::atomic<int64_t> read_timeout_us;
+    // Packet bytes a trim may hold while looking for its start (trim.cpp Buffer); 0: no limit.
+    std::atomic<int64_t> max_buffered_bytes;
     // Media time written on the operation's target timeline, summed over its calls (see Progress).
     std::atomic<int64_t> processed_us{0};
     // The input's duration once it is open; -1 while unknown, or when FFmpeg only estimated it from the bit rate.

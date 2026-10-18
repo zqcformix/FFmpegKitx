@@ -227,8 +227,9 @@ jobject ToJava(JNIEnv* env, const Status& status, const std::vector<int64_t>& ti
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_io_github_nova_ffmpegkit_NativeTask_create(JNIEnv* /* env */, jclass /* clazz */, jint log_level,
-                                                jint max_log_entries, jlong read_timeout_us) {
-    return reinterpret_cast<jlong>(new remux::Task(log_level, max_log_entries, read_timeout_us));
+                                                jint max_log_entries, jlong read_timeout_us,
+                                                jlong max_buffered_bytes) {
+    return reinterpret_cast<jlong>(new remux::Task(log_level, max_log_entries, read_timeout_us, max_buffered_bytes));
 }
 
 extern "C" JNIEXPORT jobject JNICALL

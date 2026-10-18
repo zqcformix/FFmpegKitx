@@ -1,6 +1,6 @@
 # Android 编辑 API 设计（M1 草案）
 
-> **状态：已随 `v1.1.0` 发布（2026-10-18）。** 已实现：`FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`、`TrimRequest`（含 `TrimMode`）、`SplitRequest.byDuration`/`byRanges`、`MediaInput`/`MediaOutput`、`File`/`Uri` 的 `trimTo`/`splitTo`/`probe` 扩展、`MediaInfo`/`StreamInfo`、`TimeRange`、`FFmpegException`，以及第 3、4、7、8 节的行为和协程取消。**v1.1.0 之后（未发布）**：第 5 节的进度回调 `onProgress`/`MediaProgress`、任务日志 `MediaLog`（路线图 5.2）、内部会话状态机（5.1），以及可中断读取、`FFmpeg.readTimeout`、交付复制阶段的取消与"抛出即不留输出"（5.3）。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
+> **状态：已随 `v1.1.0` 发布（2026-10-18）。** 已实现：`FFmpeg.trim`/`FFmpeg.split`/`FFmpeg.probe`、`TrimRequest`（含 `TrimMode`）、`SplitRequest.byDuration`/`byRanges`、`MediaInput`/`MediaOutput`、`File`/`Uri` 的 `trimTo`/`splitTo`/`probe` 扩展、`MediaInfo`/`StreamInfo`、`TimeRange`、`FFmpegException`，以及第 3、4、7、8 节的行为和协程取消。**v1.1.0 之后（未发布）**：第 5 节的进度回调 `onProgress`/`MediaProgress`、任务日志 `MediaLog`（路线图 5.2）、内部会话状态机（5.1），可中断读取、`FFmpeg.readTimeout`、交付复制阶段的取消与"抛出即不留输出"（5.3），以及并发上限与缓冲预算 `FFmpeg.limits`（5.4）。实现进度以[路线图](ROADMAP.zh-CN.md)为准。
 
 本文是 M1 范围、行为与限制的唯一出处；其他文档只引用，不复述。
 
@@ -131,7 +131,12 @@ fun startTrim(
   - 打开 `content://` 输入时把取消传给 `ContentResolver.openFileDescriptor` 的 `CancellationSignal`；提供方是否响应由提供方决定。
   - 交付复制每 8 MiB 检查一次取消。
 - **抛出即不留输出**：调用只要不是正常返回（失败、取消、回调抛出，包括交付完成之后、函数返回之前才到达的取消），就撤回本次已发布的文件输出与分割段；只删除身份（设备号与 inode）仍与发布时相同的文件，无法确认或删除失败时保留，并以 suppressed 异常说明。`Uri` 输出无法撤回：复制开始后 `Uri` 的原内容已被替换或部分写入，由调用方删除或重试（写 MediaStore 时保持 `IS_PENDING` 直到函数返回，见第 7 节）。
-- **读取超时**：`FFmpeg.readTimeout`（默认 `null`，不限时）设为正值后，`Uri` 或描述符输入的单次读取超过该时长即以 `FFmpegException`（`IO`，`nativeErrorCode` 为 `ETIMEDOUT`）失败，对之后开始的调用生效。默认不限时，因为按需下载的提供方可能合理地读得很慢；卡住时可以取消。本地文件输入不受影响。
+- **读取超时**：`FFmpeg.readTimeout`（默认 `null`，不限时）设为正值后，`Uri` 或描述符输入的单次读取超过该时长即以 `FFmpegException`（`IO`，`nativeErrorCode` 为 `ETIMEDOUT`）失败，对之后开始的调用生效。默认不限时，因为按需下载的提供方可能合理地读得很慢；卡住时可以取消。卡住而未被取消的任务一直占着并发名额（见下条），无法保证调用会被取消时应设置超时。本地文件输入不受影响。
+- **并发与资源**（路线图 5.4）：`FFmpeg.limits = OperationLimits(maxConcurrentOperations, maxBufferedBytes)`，默认 4 个、128 MiB。
+  - trim、split、probe 共用并发上限；超出的调用按调用顺序排队，排队期间可以取消（会话停在"排队"，直接结束为取消，不会运行）。新的上限对仍在排队的调用同样生效。
+  - **卡住的任务占着名额**：`readTimeout` 默认不限时，读取卡在提供方的任务会一直运行到被取消。如果所有名额都被这样的任务占住，之后的 trim、split 和 probe 都会排队等待。因此在会随页面或用户操作取消的 scope 中调用（如 `viewModelScope`），并给用户取消入口；在不会被取消的 scope 中调用时，设置 `FFmpeg.readTimeout`。
+  - 每个运行中的操作最多缓冲 `maxBufferedBytes / maxConcurrentOperations` 字节的包（默认 32 MiB）。只有 trim 需要缓冲：它从起点之前的关键帧读到起点，GOP 很长的输入（如只有一个关键帧的录屏）原本可能缓冲大半个文件。达到上限时以已找到的关键帧为起点立即开始写出，不会因此失败；有索引的输入（MP4 等）输出与不受限时逐包相同，无索引的输入（MPEG-TS 等）可能从更早的关键帧开始。
+  - 不保留历史：会话只在调用期间存在，结果与异常上的日志受 `MediaLog.Options.maxEntries` 限制。每个运行中的操作占一个 IO 线程，描述符输入另有一个读取线程，结束后即退出；被取消时卡住的读取线程要等提供方返回才退出。
 - **会话**（路线图 5.1，内部实现，暂不公开）：每次调用对应一个进程内唯一 ID 的会话，状态为排队 → 执行 → 成功 | 失败 | 取消，终态只设置一次，并且在原生资源与临时文件释放之后才设置。终态就是调用的结束方式：正常返回为成功，抛出 `CancellationException` 为取消，抛出其他异常为失败。优先级规则如下：
   - 取消请求在工作结束前到达时，即使中断导致了原生错误，也以取消结束，不报 `FFmpegException`。
   - 失败在取消请求之前已经结束工作时，以失败结束。
@@ -200,7 +205,7 @@ try {
 - **轨道**：最多一个视频轨及音频轨。多个视频轨、所选范围内某音视频轨完全没有包会失败。不复制字幕、封面附件和数据轨。
 - **容器**：只输出单文件容器，不支持 HLS/DASH/图片序列。容器与编码不兼容时报错，不自动转码。
 - **输出交付**：先写同目录的隐藏临时文件（`.名称.随机串.part.扩展名`，保留扩展名以选择容器），trailer 写入和关闭成功后才交付。交付不覆盖任何已有文件，依次尝试：`renameat2(RENAME_NOREPLACE)` 原子发布（libc 自 Android 11 提供）；硬链接（Android 的 SELinux 拒绝应用对自身文件建硬链接，主要用于其他平台）；最后用 `CREATE_NEW` 排他创建后复制。复制期间路径可能已出现但内容不完整，调用方必须等函数返回再读取。复制失败时只删除本次创建且身份（设备号与 inode）仍匹配的文件；无法确认时保留，并以 suppressed 异常说明。
-- **并发**：多个任务可以处理不同文件。不要在执行期间替换输入、输出或父目录。同一输出路径的竞争会失败，而不是覆盖。回滚只处理本次创建且身份仍匹配的文件，不是跨进程事务。
+- **并发**：多个任务可以处理不同文件，同时执行的数量受第 5 节"并发与资源"限制。不要在执行期间替换输入、输出或父目录。同一输出路径的竞争会失败，而不是覆盖。回滚只处理本次创建且身份仍匹配的文件，不是跨进程事务。
 - **不在 M1**：多轨选择、字幕与 metadata 保留、网络输入、精确裁剪、画面 crop、Java 入口，见路线图。
 
 ## 8. 媒体探测
