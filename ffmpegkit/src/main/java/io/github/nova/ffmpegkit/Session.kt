@@ -79,9 +79,15 @@ internal class TaskProgress(
 internal class NativeTask(
     private val logOptions: MediaLog.Options = FFmpeg.logOptions,
     readTimeout: Duration? = FFmpeg.readTimeout,
+    limits: OperationLimits = FFmpeg.limits,
 ) : Task {
     private val lock = Any()
-    private var handle: Long = create(logOptions.level.avLevel, logOptions.maxEntries, readTimeout?.inWholeMicroseconds ?: 0L)
+    private var handle: Long = create(
+        logOptions.level.avLevel,
+        logOptions.maxEntries,
+        readTimeout?.inWholeMicroseconds ?: 0L,
+        limits.bufferedBytesPerOperation,
+    )
     private val redactions = Redactions()
     private val cancelActions = mutableListOf<() -> Unit>()
 
@@ -156,10 +162,11 @@ internal class NativeTask(
 
         /**
          * [logLevel]: `AV_LOG_*`; lines at most this severe are kept, the latest [maxLogEntries] of them.
-         * [readTimeoutUs]: a descriptor read taking longer fails; 0 for no limit.
+         * [readTimeoutUs]: a descriptor read taking longer fails; 0 for no limit. [maxBufferedBytes]:
+         * packet bytes a trim may hold while looking for its start.
          */
         @JvmStatic
-        private external fun create(logLevel: Int, maxLogEntries: Int, readTimeoutUs: Long): Long
+        private external fun create(logLevel: Int, maxLogEntries: Int, readTimeoutUs: Long, maxBufferedBytes: Long): Long
 
         @JvmStatic
         private external fun log(handle: Long): NativeLog
@@ -298,7 +305,8 @@ internal class Rollbacks {
 internal val PROGRESS_INTERVAL = 100.milliseconds
 
 /**
- * Runs blocking native [work] on [Dispatchers.IO] as one [Session]. If the calling coroutine is
+ * Runs blocking native [work] on [Dispatchers.IO] as one [Session], once [queue] has a free slot
+ * (the session is queued until then, and waiting is cancellable). If the calling coroutine is
  * cancelled, the native side is told to stop, and this only returns (by rethrowing the cancellation)
  * once [work] has finished cleaning up. Cancellation is never turned into an [FFmpegException].
  *
@@ -315,21 +323,31 @@ internal suspend fun <T> runNative(
     operation: String,
     progress: ProgressReporter? = null,
     newTask: () -> Task = { NativeTask() },
+    queue: OperationQueue = FFmpeg.queue,
     work: (Task) -> T,
 ): T {
     val session = Session(operation)
-    val result = runCatching {
-        newTask().use { task ->
-            try {
-                run(session, task, progress, work)
-            } catch (e: Throwable) {
-                withContext(NonCancellable + Dispatchers.IO) { task.rollbacks.run(e) }
-                throw e
-            }
+    try {
+        return queue.withSlot {
+            // The session ends before its slot is released, so no more sessions than slots are ever running.
+            val result = runCatching { runTask(session, newTask(), progress, work) }
+            result.fold({ session.succeed(it) }, { session.fail(it) })
+            result.getOrThrow()
         }
+    } catch (e: Throwable) {
+        session.fail(e) // cancelled while queued; does nothing if the session already ended
+        throw e
     }
-    result.fold({ session.succeed(it) }, { session.fail(it) })
-    return result.getOrThrow()
+}
+
+/** Runs the work on [task], closing it afterwards; if the call does not return a value, rolls back what it published. */
+private suspend fun <T> runTask(session: Session, task: Task, progress: ProgressReporter?, work: (Task) -> T): T = task.use {
+    try {
+        run(session, task, progress, work)
+    } catch (e: Throwable) {
+        withContext(NonCancellable + Dispatchers.IO) { task.rollbacks.run(e) }
+        throw e
+    }
 }
 
 private suspend fun <T> run(session: Session, task: Task, progress: ProgressReporter?, work: (Task) -> T): T = coroutineScope {

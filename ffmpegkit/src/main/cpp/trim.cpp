@@ -140,8 +140,7 @@ private:
 
         if (!track.video) {
             // Audio stored before the keyframe in the file may still play after it.
-            pending_.push_back(std::move(packet));
-            return 0;
+            return Buffer(std::move(packet));
         }
         const bool keyframe = (packet->flags & AV_PKT_FLAG_KEY) && packet->pts != AV_NOPTS_VALUE;
         const int64_t pts_abs = packet->pts == AV_NOPTS_VALUE ? INT64_MIN : ToMicros(packet->pts, st->time_base);
@@ -150,8 +149,7 @@ private:
             has_candidate_ = true;
             SetAnchor(packet->pts, st->time_base);
             DropPendingBeforeAnchor();
-            pending_.push_back(std::move(packet));
-            return 0;
+            return Buffer(std::move(packet));
         }
         if (!has_candidate_) {
             if (!keyframe) return 0;  // cannot decode without the preceding keyframe
@@ -163,12 +161,31 @@ private:
             }
             SetAnchor(packet->pts, st->time_base);  // the input's first keyframe is already past the start
             has_candidate_ = true;
-            pending_.push_back(std::move(packet));
-            return Flush();
+            const int ret = Buffer(std::move(packet));
+            return ret < 0 ? ret : Flush();
         }
         const int64_t decode_abs = ToMicros(packet->dts != AV_NOPTS_VALUE ? packet->dts : packet->pts, st->time_base);
-        pending_.push_back(std::move(packet));
+        const int ret = Buffer(std::move(packet));
+        if (ret < 0 || anchored_) return ret;
         if ((keyframe && pts_abs > start_abs_) || decode_abs >= start_abs_) return Flush();
+        return 0;
+    }
+
+    // Keeps a packet until the anchor is fixed. The buffer holds about one GOP; when it outgrows the
+    // task's share of the buffer budget (an input with very long GOPs), the current keyframe candidate
+    // becomes the anchor at once. That is always a valid start, it only may be earlier than a later
+    // keyframe at or before the start that an input without an index could still bring. Without a
+    // candidate yet (only audio buffered), the oldest packets are dropped: they precede any keyframe.
+    int Buffer(Packet packet) {
+        pending_bytes_ += packet->size;
+        pending_.push_back(std::move(packet));
+        const int64_t limit = task_->max_buffered_bytes.load(std::memory_order_relaxed);
+        if (limit <= 0 || pending_bytes_ <= limit) return 0;
+        if (has_candidate_) return Flush();
+        while (pending_bytes_ > limit && pending_.size() > 1) {
+            pending_bytes_ -= pending_.front()->size;
+            pending_.pop_front();
+        }
         return 0;
     }
 
@@ -177,6 +194,7 @@ private:
     Status SeekEarlier() {
         overshot_ = false;
         pending_.clear();
+        pending_bytes_ = 0;
         has_candidate_ = false;
         seen_before_start_ = false;
         pending_end_abs_ = INT64_MIN;
@@ -205,6 +223,8 @@ private:
                        av_compare_ts(packet->pts, st->time_base, anchor_pts_, anchor_time_base_) < 0;
             }),
             pending_.end());
+        pending_bytes_ = 0;
+        for (const Packet& packet : pending_) pending_bytes_ += packet->size;
     }
 
     int Flush() {
@@ -213,6 +233,7 @@ private:
         while (!pending_.empty()) {
             Packet packet = std::move(pending_.front());
             pending_.pop_front();
+            pending_bytes_ -= packet->size;
             int ret = Emit(packet.get());
             if (ret < 0) return ret;
         }
@@ -312,6 +333,7 @@ private:
     int64_t shift_pts_ = 0;
     AVRational shift_time_base_ = AV_TIME_BASE_Q;
     std::deque<Packet> pending_;
+    int64_t pending_bytes_ = 0;  // payload bytes in pending_
     int64_t pending_end_abs_ = INT64_MIN;
 
     int64_t first_abs_ = INT64_MAX;

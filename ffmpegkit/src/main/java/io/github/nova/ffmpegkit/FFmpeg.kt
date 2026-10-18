@@ -85,8 +85,9 @@ object FFmpeg {
     /**
      * The longest a single read from a `Uri` or [android.os.ParcelFileDescriptor] input may take
      * before the operation fails with [FFmpegException.Reason.IO]; null (the default) for no limit.
-     * Applies to operations started from now on. Cancellation stops a stuck read either way. Local
-     * file inputs are read by FFmpeg directly and are not affected.
+     * Applies to operations started from now on. Cancellation stops a stuck read either way, but an
+     * operation stuck without a limit and never cancelled keeps its slot in [limits]; set a timeout
+     * where calls may not be cancelled. Local file inputs are read by FFmpeg directly and are not affected.
      *
      * @throws IllegalArgumentException if set to a value that is not positive and finite.
      */
@@ -96,6 +97,20 @@ object FFmpeg {
             require(value == null || (value.isPositive() && value.isFinite())) { "readTimeout must be positive and finite: $value" }
             field = value
         }
+
+    /**
+     * How many operations run at once and how much they may buffer; see [OperationLimits]. Defaults
+     * to 4 operations and 128 MiB. A new value applies to calls still waiting for a slot as well.
+     */
+    @Volatile
+    var limits: OperationLimits = OperationLimits()
+        set(value) {
+            field = value
+            queue.limitChanged()
+        }
+
+    /** Slots for running operations; every trim, split and probe waits for one. */
+    internal val queue = OperationQueue { limits.maxConcurrentOperations }
 
     /** Test hook: sees the thread each operation's work runs on. */
     @Volatile
