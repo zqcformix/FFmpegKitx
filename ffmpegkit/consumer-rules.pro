@@ -11,3 +11,7 @@
 -keep class io.github.nova.ffmpegkit.NativeProbeResult {
     <init>(io.github.nova.ffmpegkit.NativeRemuxStatus, long[], java.lang.String[]);
 }
+# Constructed from log.cpp.
+-keep class io.github.nova.ffmpegkit.NativeLog {
+    <init>(int[], byte[][], byte[][], int);
+}

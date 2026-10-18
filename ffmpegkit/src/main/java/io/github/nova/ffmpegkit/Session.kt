@@ -34,6 +34,12 @@ internal interface Task : Closeable {
     /** Sets the 1-based segment being written, for work that makes one native call per segment. */
     fun setSegment(index: Int)
 
+    /** Makes [path], as passed to native code, read as [placeholder] in [log] (when paths are redacted). */
+    fun redact(path: String?, placeholder: String)
+
+    /** What FFmpeg logged during the task's native calls so far. */
+    fun log(): MediaLog
+
     /** Throws [CancellationException] if [cancel] was called; checked before publishing outputs. */
     fun throwIfCancelled() {
         if (isCancelled) throw CancellationException("cancelled")
@@ -58,9 +64,10 @@ internal class TaskProgress(
  * interrupt callback and between packets, then stops and cleans up; it writes the progress counters
  * as it goes.
  */
-internal class NativeTask : Task {
+internal class NativeTask(private val logOptions: MediaLog.Options = FFmpeg.logOptions) : Task {
     private val lock = Any()
-    private var handle: Long = create()
+    private var handle: Long = create(logOptions.level.avLevel, logOptions.maxEntries)
+    private val redactions = Redactions()
 
     @Volatile
     override var isCancelled: Boolean = false
@@ -98,6 +105,13 @@ internal class NativeTask : Task {
         }
     }
 
+    override fun redact(path: String?, placeholder: String) = redactions.add(path, placeholder)
+
+    override fun log(): MediaLog = synchronized(lock) {
+        if (handle == 0L) return MediaLog.EMPTY
+        log(handle).toMediaLog(redactions.takeIf { logOptions.redactPaths })
+    }
+
     override fun close() {
         synchronized(lock) {
             if (handle != 0L) destroy(handle)
@@ -110,8 +124,12 @@ internal class NativeTask : Task {
             System.loadLibrary("ffmpegkit")
         }
 
+        /** [logLevel]: `AV_LOG_*`; lines at most this severe are kept, the latest [maxLogEntries] of them. */
         @JvmStatic
-        private external fun create(): Long
+        private external fun create(logLevel: Int, maxLogEntries: Int): Long
+
+        @JvmStatic
+        private external fun log(handle: Long): NativeLog
 
         @JvmStatic
         private external fun cancel(handle: Long)
@@ -225,6 +243,8 @@ internal val PROGRESS_INTERVAL = 100.milliseconds
  * cancelled, the native side is told to stop, and this only returns (by rethrowing the cancellation)
  * once [work] has finished cleaning up. Cancellation is never turned into an [FFmpegException].
  *
+ * A failure that is an [FFmpegException] carries the task's [MediaLog].
+ *
  * With a [progress] reporter, the task's counters are read every [PROGRESS_INTERVAL] while the work
  * runs, and [ProgressReporter.finish] reports completion after [work] returned (its outputs are
  * delivered by then). Callbacks run on IO threads, one at a time, and never after this returns. An
@@ -233,7 +253,7 @@ internal val PROGRESS_INTERVAL = 100.milliseconds
 internal suspend fun <T> runNative(
     operation: String,
     progress: ProgressReporter? = null,
-    newTask: () -> Task = ::NativeTask,
+    newTask: () -> Task = { NativeTask() },
     work: (Task) -> T,
 ): T {
     val session = Session(operation)
@@ -251,6 +271,7 @@ private suspend fun <T> run(session: Session, task: Task, progress: ProgressRepo
         } catch (e: Exception) {
             // Work stopped by cancel() must end as a cancellation, not as the error it caused.
             task.throwIfCancelled()
+            if (e is FFmpegException) e.log = task.log()
             throw e
         }
     }

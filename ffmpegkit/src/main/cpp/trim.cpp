@@ -334,6 +334,7 @@ Java_io_github_nova_ffmpegkit_NativeTrim_trim(
         jlong end_us,
         jboolean edit_list,
         jlong task) {
+    remux::LogScope logs(remux::LogOf(task));
     remux::Task scratch;
     Trimmer trimmer(remux::ToSource(env, input_path, input_fd), ToUtf8Path(env, output), start_us, end_us,
                     edit_list == JNI_TRUE, remux::FromHandle(task, &scratch));

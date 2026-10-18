@@ -31,7 +31,7 @@ internal object Trimmer {
             is MediaOutput.ToUri ->
                 UriDelivery.deliver(output, task?.delivery) { temp -> run(input, temp, output, range, editList, task) }
         }
-        return TrimResult(range, TimeRange(times[0].microseconds, times[1].microseconds), output)
+        return TrimResult(range, TimeRange(times[0].microseconds, times[1].microseconds), output, task?.log() ?: MediaLog.EMPTY)
     }
 
     private fun run(
@@ -42,6 +42,8 @@ internal object Trimmer {
         editList: Boolean,
         task: Task?,
     ): LongArray = input.open().use { opened ->
+        task?.redact(opened.path, Redactions.INPUT)
+        task?.redact(temp.path, Redactions.OUTPUT)
         val status = NativeTrim.trim(
             opened.path?.toByteArray(),
             opened.fd,

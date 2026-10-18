@@ -153,6 +153,7 @@ Java_io_github_nova_ffmpegkit_NativeSplit_split(
         jlong segment_us,
         jint max_segments,
         jlong task) {
+    remux::LogScope logs(remux::LogOf(task));
     remux::Task scratch;
     Splitter splitter(remux::ToSource(env, input_path, input_fd), ToUtf8Path(env, directory), ToUtf8Path(env, extension),
                       segment_us, max_segments, remux::FromHandle(task, &scratch));

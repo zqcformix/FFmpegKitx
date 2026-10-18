@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "log.h"
+
 extern "C" {
 #include "libavcodec/avcodec.h"
 #include "libavformat/avformat.h"
@@ -71,6 +73,8 @@ struct Source {
 // and cleans up as usual. The worker writes the progress counters and Kotlin polls them from another
 // thread, so every field is atomic; each has a single writer.
 struct Task {
+    explicit Task(int log_level = AV_LOG_WARNING, int max_log_entries = 0) : log(log_level, max_log_entries) {}
+
     std::atomic<bool> cancelled{false};
     // Media time written on the operation's target timeline, summed over its calls (see Progress).
     std::atomic<int64_t> processed_us{0};
@@ -80,6 +84,8 @@ struct Task {
     std::atomic<int64_t> bytes_written{0};
     // 1-based segment being written: set by split.cpp, or from Kotlin before each range of a split by ranges.
     std::atomic<int32_t> segment{1};
+    // What FFmpeg logged on the worker thread during the task's calls (each call holds a LogScope).
+    LogBuffer log;
 
     bool IsCancelled() const { return cancelled.load(std::memory_order_relaxed); }
 };
@@ -87,6 +93,9 @@ struct Task {
 // The Task behind a handle from NativeTask.create(), or `scratch` for handle 0 (calls made without a
 // task, whose progress nobody reads).
 Task* FromHandle(jlong handle, Task* scratch);
+
+// The log of the Task behind a handle, or null for handle 0 (its logs are engine logs).
+LogBuffer* LogOf(jlong handle);
 
 // Reports the media time one native call has written, on top of what earlier calls of the task wrote.
 class Progress {

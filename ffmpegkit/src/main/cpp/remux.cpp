@@ -61,6 +61,10 @@ Task* FromHandle(jlong handle, Task* scratch) {
     return handle == 0 ? scratch : reinterpret_cast<Task*>(handle);
 }
 
+LogBuffer* LogOf(jlong handle) {
+    return handle == 0 ? nullptr : &reinterpret_cast<Task*>(handle)->log;
+}
+
 Status Cancelled() {
     return Failure(AVERROR_EXIT, false, "cancelled");
 }
@@ -242,8 +246,14 @@ jobject ToJava(JNIEnv* env, const Status& status, const std::vector<int64_t>& ti
 }  // namespace remux
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_io_github_nova_ffmpegkit_NativeTask_create(JNIEnv* /* env */, jclass /* clazz */) {
-    return reinterpret_cast<jlong>(new remux::Task());
+Java_io_github_nova_ffmpegkit_NativeTask_create(JNIEnv* /* env */, jclass /* clazz */, jint log_level,
+                                                jint max_log_entries) {
+    return reinterpret_cast<jlong>(new remux::Task(log_level, max_log_entries));
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_io_github_nova_ffmpegkit_NativeTask_log(JNIEnv* env, jclass /* clazz */, jlong handle) {
+    return remux::LogToJava(env, reinterpret_cast<const remux::Task*>(handle)->log);
 }
 
 extern "C" JNIEXPORT void JNICALL
