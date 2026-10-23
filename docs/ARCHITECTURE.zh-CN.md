@@ -78,6 +78,20 @@ Android、Apple、HarmonyOS 共享媒体语义、测试样本和 C ABI，不共�
 
   `connectedCapiTest -PcapiTestAsan` 用 AddressSanitizer 构建核心和测试程序后运行。没有用 HWASan：在量产的 Android 14 设备上，预编译的 FFmpeg 经系统分配器申请的内存带着系统的指针标签（0xb4），对它的每次写入都会被误报。
 
+### 2.3 命令行入口（路线图 6.3）
+
+- **做法**：FFmpeg 8.0.1 的 fftools（`ffmpeg` 命令行，约 2.1 万行）原样放进 `cpp/fftools/`，构建成独立的 `libffmpegkitx_cli.so`，只导出 `ffkx_fftools_run`。核心的 `ffkx_execute` 在第一次调用时 `dlopen` 它，两者之间只通过一组钩子交互：取消、工作线程登记、进度、拒绝的选项。这样 LGPL 的 fftools 与 MIT 的核心保持独立，7.3 拆分功能包时也可以不带它。
+- **为什么串行**：fftools 把状态放在约 70 个全局变量和文件级静态变量里，ffmpeg 8 的调度器工作线程也读写它们，改成 `thread_local` 行不通；改成每次运行一个上下文，又要大改上游代码，每次升级 FFmpeg 都得重做。所以同一时刻只运行一条命令（全局锁，等锁期间可取消），每次运行前把全局状态复位到进程刚启动时的样子。编辑操作不受这把锁影响。
+- **对上游的改动**（标记为 `FFKX`，清单见 `cpp/fftools/README.md`）：
+  - `main` 改名；不装信号处理，不动终端，没有 stdin。
+  - 取消：输入用单独的中断回调，取消后立即停止读取，包括非阻塞输入的 EAGAIN 重试；主循环最多每 100 ms 检查一次取消；输出的 I/O 只在转码开始前中断，转码开始后让主循环像按 `q` 一样收尾，收尾卡住超过 3 s 才中断（相当于第二次 Ctrl-C）。
+  - `print_report` 把进度报给任务；工作线程开始和结束时登记，日志因此归到任务。
+  - 不带 `-y` 而输出已存在时报 `EEXIST`，上游会以退出码 0 结束。
+  - 忽略 `FFREPORT`；各文件提供复位函数。
+- **拒绝的选项**：会改变整个进程状态的选项（`-report` 会替换 FFmpeg 的日志回调，`-timelimit` 会对整个进程设置 CPU 上限，`-cpuflags`、`-cpucount`、`-max_alloc` 等），以及打印帮助后退出的选项，在运行前按 fftools 自己的选项表识别并拒绝：识别时知道哪些选项带值，也区分 `-noX`。`-loglevel` 允许使用，核心在命令前后保存并恢复全局日志级别。
+- **构建配置**：没有 FFmpeg 的 configure，`cpp/fftools/config.h` 只写 fftools 和它用到的私有头文件实际使用的宏（Android/bionic 的取值）。`FFMPEG_CONFIGURATION` 由 CMake 从该 ABI 的 `libavutil.so` 读出，banner 中的配置与库一致。私有头文件取自同一版本源码，放在 `cpp/` 下与公开头文件并列。
+- **与编辑操作的差异**：见 [Android 编辑 API](ANDROID_API.zh-CN.md) 第 9 节。主要是输出由 ffmpeg 直接写入，没有临时文件、不能回滚；只认文件和协议，`content://` 要经 `fd:`。
+
 ## 3. 基础操作的契约
 
 本节是跨平台通用契约。Android M1 的具体范围与限制见 [Android 编辑 API 第 7 节](ANDROID_API.zh-CN.md#7-m1-范围与限制)。

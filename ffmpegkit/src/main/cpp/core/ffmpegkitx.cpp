@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "command.h"
 #include "operations.h"
 
 extern "C" {
@@ -72,6 +73,7 @@ constexpr size_t kProbeOptionsSize = FIRST_VERSION_SIZE(ffkx_probe_options, inpu
 constexpr size_t kFormatInfoSize = FIRST_VERSION_SIZE(ffkx_format_info, format_name);
 constexpr size_t kStreamInfoSize = FIRST_VERSION_SIZE(ffkx_stream_info, channel_layout);
 constexpr size_t kEngineLogSinkSize = FIRST_VERSION_SIZE(ffkx_engine_log_sink, release);
+constexpr size_t kExecuteOptionsSize = FIRST_VERSION_SIZE(ffkx_execute_options, arguments);
 #undef FIRST_VERSION_SIZE
 
 // No version of any struct gets near this; a larger struct_size is garbage, not a newer header.
@@ -631,6 +633,36 @@ ffkx_status ffkx_media_info_stream(const ffkx_media_info* info, uint32_t index, 
 
 void ffkx_media_info_free(ffkx_media_info* info) {
     delete info;
+}
+
+// ---- Command line --------------------------------------------------------------------------------
+
+ffkx_status ffkx_execute(const ffkx_execute_options* options, ffkx_task* task, ffkx_error* error) {
+    if (error != nullptr && !Writable(error, kErrorSize)) return FFKX_ERROR_INVALID_ARGUMENT;
+    return Guard(error, [&]() -> ffkx_status {
+        ffkx_execute_options values;
+        Invalid invalid{};
+        if (!ReadOptions(options, kExecuteOptionsSize, &values, &invalid) ||
+            !CheckFlags(values.flags, 0, values.reserved, &invalid)) {
+            return Report(error, invalid);
+        }
+        if (values.argument_count < 0 || (values.argument_count > 0 && values.arguments == nullptr)) {
+            return Report(error, Invalid{FFKX_ERROR_INVALID_ARGUMENT, "arguments is not set"});
+        }
+        std::vector<std::string> arguments;
+        for (int32_t i = 0; i < values.argument_count; ++i) {
+            if (values.arguments[i] == nullptr) {
+                return Report(error, Invalid{FFKX_ERROR_INVALID_ARGUMENT, "an argument is NULL"});
+            }
+            arguments.emplace_back(values.arguments[i]);
+        }
+        OperationTask operation(task);
+        if (const Invalid* refusal = operation.refusal()) return Report(error, *refusal);
+        const remux::Status status =
+            remux::RunCommand(arguments, operation.get(), task != nullptr ? &task->impl.log : nullptr);
+        // A command's failure concerns no side the library knows of.
+        return Report(error, status.status, status.code, FFKX_SIDE_NONE, status.message.c_str());
+    });
 }
 
 }  // extern "C"

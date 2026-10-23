@@ -51,6 +51,9 @@ internal fun interface ProgressTimeline {
         /** Split by duration: the whole input. */
         val WHOLE_INPUT = ProgressTimeline { it }
 
+        /** A command line ([FFmpeg.execute]): its output's length is not known in advance. */
+        val UNKNOWN = ProgressTimeline { null }
+
         /** Trim (one range) and split by ranges: the ranges one after another, each clamped to the input. */
         fun ranges(ranges: List<TimeRange>) = ProgressTimeline { durationUs ->
             var total = 0L

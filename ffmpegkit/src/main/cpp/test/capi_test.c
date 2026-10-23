@@ -19,6 +19,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -103,6 +106,12 @@ PIN_FIELD(ffkx_engine_log_sink, level, 4);
 PIN_FIELD(ffkx_engine_log_sink, callback, 8);
 PIN_FIELD(ffkx_engine_log_sink, user_data, 8 + P);
 PIN_FIELD(ffkx_engine_log_sink, release, 8 + 2 * P);
+
+PIN_SIZE(ffkx_execute_options, 16 + P);
+PIN_FIELD(ffkx_execute_options, flags, 4);
+PIN_FIELD(ffkx_execute_options, argument_count, 8);
+PIN_FIELD(ffkx_execute_options, reserved, 12);
+PIN_FIELD(ffkx_execute_options, arguments, 16);
 
 PIN_SIZE(ffkx_stream_info, 88 + 2 * P);
 PIN_FIELD(ffkx_stream_info, media_type, 4);
@@ -1474,6 +1483,285 @@ static void parallel_operations(void) {
     }
 }
 
+/* ---- Command line (roadmap 6.3) ------------------------------------------------------------------ */
+
+#include <stdarg.h>
+
+/* Runs ffmpeg with the arguments that follow, up to a NULL. */
+static ffkx_status execute(ffkx_task* task, ffkx_error* error, ...) {
+    const char* arguments[32];
+    int count = 0;
+    va_list list;
+    va_start(list, error);
+    for (const char* argument; count < 32 && (argument = va_arg(list, const char*)) != NULL;) arguments[count++] = argument;
+    va_end(list);
+    ffkx_execute_options options;
+    memset(&options, 0, sizeof(options));
+    options.struct_size = sizeof(options);
+    options.argument_count = count;
+    options.arguments = arguments;
+    return ffkx_execute(&options, task, error);
+}
+
+static void execute_copy(void) {
+    const char* output = scratch("command-copy.mp4");
+    ffkx_task* task = new_task(FFKX_LOG_VERBOSE, 1000);
+    ffkx_error error = new_error();
+    CHECK_STATUS(FFKX_OK, execute(task, &error, "-hide_banner", "-nostdin", "-i", av_path, "-t", "2", "-c", "copy", output, NULL));
+    CHECK_STATUS(FFKX_OK, error.status);
+    CHECK_I64(FFKX_SIDE_NONE, error.side);
+    /* The worker threads' lines reach the task's log too. */
+    CHECK(log_contains(task, "Terminating thread with return code 0"));
+    const ffkx_progress progress = progress_of(task);
+    CHECK(progress.processed_us >= 1900000);
+    CHECK(progress.bytes_written > 0);
+    CHECK_I64(FFKX_UNKNOWN, progress.duration_us);
+    ffkx_task_release(task);
+
+    ffkx_media_info* info = probe_path(output);
+    const ffkx_format_info format = format_of(info);
+    CHECK_I64(2, format.stream_count);
+    CHECK(format.duration_us >= 1900000 && format.duration_us <= 2200000);
+    ffkx_media_info_free(info);
+}
+
+static void execute_transcode(void) {
+    const char* output = scratch("command-transcode.mp4");
+    ffkx_error error = new_error();
+    CHECK_STATUS(FFKX_OK, execute(NULL, &error, "-i", av_path, "-t", "1", "-vf", "scale=160:120", "-c:v", "mpeg4",
+                                  "-c:a", "aac", output, NULL));
+    ffkx_media_info* info = probe_path(output);
+    const ffkx_stream_info video = stream_of(info, 0);
+    CHECK_STR("mpeg4", video.codec_name);
+    CHECK_I64(160, video.width);
+    CHECK_I64(120, video.height);
+    CHECK_STR("aac", stream_of(info, 1).codec_name);
+    ffkx_media_info_free(info);
+}
+
+static void execute_failures(void) {
+    const char* output = scratch("command-exists.mp4");
+    ffkx_error error = new_error();
+    /* -y overwrites, and is forgotten by the next command, which refuses to. */
+    CHECK_STATUS(FFKX_OK, execute(NULL, &error, "-i", av_path, "-t", "1", "-c", "copy", output, NULL));
+    CHECK_STATUS(FFKX_OK, execute(NULL, &error, "-y", "-i", av_path, "-t", "1", "-c", "copy", output, NULL));
+    CHECK_STATUS(FFKX_ERROR_OUTPUT_EXISTS, execute(NULL, &error, "-i", av_path, "-t", "1", "-c", "copy", output, NULL));
+    CHECK_I64(-EEXIST, error.ffmpeg_error);
+    CHECK_I64(FFKX_SIDE_NONE, error.side);
+
+    CHECK_STATUS(FFKX_ERROR_INPUT_NOT_FOUND,
+                 execute(NULL, &error, "-i", scratch("missing.mp4"), scratch("command-missing.mp4"), NULL));
+    CHECK_STR("ffmpeg failed: No such file or directory (-2)", error.message);
+
+    CHECK_STATUS(FFKX_ERROR_FFMPEG, execute(NULL, &error, "-notanoption", "-i", av_path, scratch("x.mp4"), NULL));
+    CHECK_I64(TAG(0xF8, 'O', 'P', 'T'), error.ffmpeg_error); /* AVERROR_OPTION_NOT_FOUND */
+
+    /* No output: ffmpeg prints its usage and returns 1. */
+    CHECK_STATUS(FFKX_ERROR_FFMPEG, execute(NULL, &error, NULL));
+    CHECK_STR("ffmpeg exited with code 1", error.message);
+    CHECK_I64(0, error.ffmpeg_error);
+}
+
+static void execute_refused_options(void) {
+    ffkx_error error = new_error();
+    const char* output = scratch("command-refused.mp4");
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, execute(NULL, &error, "-report", "-i", av_path, output, NULL));
+    CHECK_STR("option -report is not available: it would change the whole process", error.message);
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, execute(NULL, &error, "-version", NULL));
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, execute(NULL, &error, "-i", av_path, "-cpuflags", "0", output, NULL));
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, execute(NULL, &error, "-stdin", "-i", av_path, output, NULL));
+    /* -timelimit would set the whole app's CPU limit, and SIGXCPU would kill it. */
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, execute(NULL, &error, "-timelimit", "60", "-i", av_path, output, NULL));
+    CHECK_I64(-1, file_size(output));
+    /* An option's value is not an option, and -nostdin is not -stdin. */
+    CHECK_STATUS(FFKX_OK, execute(NULL, &error, "-nostdin", "-i", av_path, "-t", "1", "-metadata", "title=-report",
+                                  "-c", "copy", output, NULL));
+
+    /* Struct rules as for the operations. */
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_execute(NULL, NULL, &error));
+    ffkx_execute_options options;
+    memset(&options, 0, sizeof(options));
+    options.struct_size = sizeof(options);
+    options.argument_count = 1;
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_execute(&options, NULL, &error));
+    const char* with_null[] = {"-i", NULL};
+    options.argument_count = 2;
+    options.arguments = with_null;
+    CHECK_STATUS(FFKX_ERROR_INVALID_ARGUMENT, ffkx_execute(&options, NULL, &error));
+    options.argument_count = 0;
+    options.reserved = 1;
+    CHECK_STATUS(FFKX_ERROR_UNSUPPORTED_VERSION, ffkx_execute(&options, NULL, &error));
+}
+
+struct command_run {
+    ffkx_task* task;
+    ffkx_status status;
+    atomic_int done;
+};
+
+/* Copies the sample in a loop forever into the null muxer: runs until cancelled. */
+static void* run_endless_command(void* argument) {
+    struct command_run* run = argument;
+    ffkx_error error = new_error();
+    const char* arguments[] = {"-nostdin", "-stream_loop", "-1", "-i", av_path, "-c", "copy", "-f", "null", "-"};
+    ffkx_execute_options options;
+    memset(&options, 0, sizeof(options));
+    options.struct_size = sizeof(options);
+    options.argument_count = 10;
+    options.arguments = arguments;
+    run->status = ffkx_execute(&options, run->task, &error);
+    atomic_store(&run->done, 1);
+    return NULL;
+}
+
+static int64_t processed_us(const ffkx_task* task) {
+    ffkx_progress progress;
+    memset(&progress, 0, sizeof(progress));
+    progress.struct_size = sizeof(progress);
+    ffkx_task_progress(task, &progress);
+    return progress.processed_us;
+}
+
+static int64_t now_ms(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+/* An endless command is cancelled once it makes progress; a second command waiting for it is cancelled
+ * while it waits. */
+static void execute_cancel(void) {
+    struct command_run running = {new_task(FFKX_LOG_WARNING, 10), FFKX_OK, 0};
+    struct command_run waiting = {new_task(FFKX_LOG_WARNING, 10), FFKX_OK, 0};
+    pthread_t first, second;
+    CHECK(pthread_create(&first, NULL, run_endless_command, &running) == 0);
+    const int64_t start = now_ms();
+    while (processed_us(running.task) < 3000000 && now_ms() - start < 20000) sched_yield();
+    CHECK(processed_us(running.task) >= 3000000);
+
+    CHECK(pthread_create(&second, NULL, run_endless_command, &waiting) == 0);
+    const struct timespec pause = {0, 100000000};
+    nanosleep(&pause, NULL);
+    CHECK(!atomic_load(&waiting.done)); /* waits for the first */
+    int64_t cancelled_at = now_ms();
+    ffkx_task_cancel(waiting.task);
+    pthread_join(second, NULL);
+    CHECK_STATUS(FFKX_ERROR_CANCELLED, waiting.status);
+    CHECK(now_ms() - cancelled_at < 1000);
+    CHECK_I64(0, processed_us(waiting.task));
+
+    cancelled_at = now_ms();
+    ffkx_task_cancel(running.task);
+    pthread_join(first, NULL);
+    CHECK_STATUS(FFKX_ERROR_CANCELLED, running.status);
+    printf("     execute_cancel: stopped %lld ms after cancel\n", (long long)(now_ms() - cancelled_at));
+    CHECK(now_ms() - cancelled_at < 3000);
+    ffkx_task_release(running.task);
+    ffkx_task_release(waiting.task);
+
+    /* The next command runs normally. */
+    ffkx_error error = new_error();
+    CHECK_STATUS(FFKX_OK, execute(NULL, &error, "-i", av_path, "-t", "1", "-c", "copy", scratch("after-cancel.mp4"), NULL));
+}
+
+/* A TCP server that sends the start of an MPEG-TS sample and then nothing, keeping the connection open:
+ * an input that stalls after transcoding has started. */
+struct stalling_server {
+    int listener;
+    const char* source;
+    atomic_int release;
+};
+
+static void* serve_then_stall(void* argument) {
+    struct stalling_server* server = argument;
+    const int client = accept(server->listener, NULL, NULL);
+    if (client < 0) return NULL;
+    FILE* source = fopen(server->source, "rb");
+    char buffer[4096];
+    size_t sent = 0, n;
+    while (source != NULL && sent < 240 * 1024 && (n = fread(buffer, 1, sizeof(buffer), source)) > 0) {
+        if (write(client, buffer, n) != (ssize_t)n) break;
+        sent += n;
+    }
+    if (source != NULL) fclose(source);
+    while (!atomic_load(&server->release)) {
+        const struct timespec pause = {0, 10000000};
+        nanosleep(&pause, NULL);
+    }
+    close(client);
+    return NULL;
+}
+
+/* A command run on its own thread with given options. */
+struct execute_call {
+    struct command_run* run;
+    const ffkx_execute_options* options;
+};
+
+static void* run_with_options(void* argument) {
+    struct execute_call* call = argument;
+    ffkx_error error = new_error();
+    call->run->status = ffkx_execute(call->options, call->run->task, &error);
+    atomic_store(&call->run->done, 1);
+    return NULL;
+}
+
+/* Cancelling a command whose input stalls after transcoding started: the input is interrupted at once
+ * (not only before transcoding, as for outputs), the command ends and frees the command line. */
+static void execute_cancel_stalled_input(void) {
+    char source[512]; /* the server thread reads it; sample()'s buffers are reused */
+    snprintf(source, sizeof(source), "%s", sample("av_offset.ts"));
+    struct stalling_server server = {socket(AF_INET, SOCK_STREAM, 0), source, 0};
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t length = sizeof(address);
+    CHECK(bind(server.listener, (struct sockaddr*)&address, sizeof(address)) == 0);
+    CHECK(listen(server.listener, 1) == 0);
+    CHECK(getsockname(server.listener, (struct sockaddr*)&address, &length) == 0);
+    char url[64];
+    snprintf(url, sizeof(url), "tcp://127.0.0.1:%d", ntohs(address.sin_port));
+    pthread_t serving;
+    CHECK(pthread_create(&serving, NULL, serve_then_stall, &server) == 0);
+
+    struct command_run run = {new_task(FFKX_LOG_WARNING, 10), FFKX_OK, 0};
+    /* A short probe, so that transcoding starts on the data sent. */
+    const char* arguments[] = {"-nostdin", "-probesize", "65536", "-analyzeduration", "1000000", "-i", url,
+                               "-c", "copy", "-f", "null", "-"};
+    ffkx_execute_options options;
+    memset(&options, 0, sizeof(options));
+    options.struct_size = sizeof(options);
+    options.argument_count = 12;
+    options.arguments = arguments;
+    pthread_t command;
+    struct execute_call call = {&run, &options};
+    CHECK(pthread_create(&command, NULL, run_with_options, &call) == 0);
+
+    /* Transcoding has started once something was written; then the input stalls. */
+    const int64_t start = now_ms();
+    while (processed_us(run.task) == 0 && now_ms() - start < 20000) sched_yield();
+    CHECK(processed_us(run.task) > 0);
+    const struct timespec settle = {0, 300000000};
+    nanosleep(&settle, NULL);
+    CHECK(!atomic_load(&run.done));
+
+    const int64_t cancelled_at = now_ms();
+    ffkx_task_cancel(run.task);
+    for (int64_t waited = 0; !atomic_load(&run.done) && waited < 10000; waited = now_ms() - cancelled_at) sched_yield();
+    const int64_t took = now_ms() - cancelled_at;
+    printf("     execute_cancel_stalled_input: stopped %lld ms after cancel\n", (long long)took);
+    CHECK(atomic_load(&run.done));
+    CHECK(took < 2000);
+
+    atomic_store(&server.release, 1);
+    pthread_join(command, NULL);
+    pthread_join(serving, NULL);
+    close(server.listener);
+    CHECK_STATUS(FFKX_ERROR_CANCELLED, run.status);
+    ffkx_task_release(run.task);
+}
+
 /* ---- Main ---------------------------------------------------------------------------------------- */
 
 int main(int argc, char** argv) {
@@ -1514,6 +1802,12 @@ int main(int argc, char** argv) {
     run("engine_sink_reentry", engine_sink_reentry);
     run("engine_sink_concurrent_setters", engine_sink_concurrent_setters);
     run("engine_sink_races", engine_sink_races);
+    run("execute_copy", execute_copy);
+    run("execute_transcode", execute_transcode);
+    run("execute_failures", execute_failures);
+    run("execute_refused_options", execute_refused_options);
+    run("execute_cancel", execute_cancel);
+    run("execute_cancel_stalled_input", execute_cancel_stalled_input);
 
     printf("ffkx_capi_test: %d checks, %d failed, %d skipped\n", checks, failures, skips);
     return failures == 0 ? 0 : 1;

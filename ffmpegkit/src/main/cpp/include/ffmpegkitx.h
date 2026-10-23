@@ -73,7 +73,7 @@ extern "C" {
 /* ---- Versions ---------------------------------------------------------------------------------- */
 
 #define FFKX_ABI_VERSION_MAJOR 0
-#define FFKX_ABI_VERSION_MINOR 2
+#define FFKX_ABI_VERSION_MINOR 3
 
 /* The loaded library's ABI version: (major << 16) | minor. */
 FFKX_API uint32_t ffkx_abi_version(void);
@@ -465,6 +465,56 @@ FFKX_API ffkx_status ffkx_media_info_format(const ffkx_media_info* info, ffkx_fo
 /* Streams in container order; index < stream_count. */
 FFKX_API ffkx_status ffkx_media_info_stream(const ffkx_media_info* info, uint32_t index, ffkx_stream_info* stream);
 FFKX_API void ffkx_media_info_free(ffkx_media_info* info);
+
+/* ---- Command line (roadmap 6.3) ---------------------------------------------------------------- */
+
+typedef struct ffkx_execute_options {
+    uint32_t struct_size;
+    uint32_t flags; /* none defined yet */
+    int32_t argument_count;
+    int32_t reserved; /* must be 0 */
+    /* ffmpeg's arguments after the program name, UTF-8. Each is passed as one argument, as is: nothing
+     * splits, unquotes or expands them, so a path needs no quoting. */
+    const char* const* arguments;
+} ffkx_execute_options;
+
+/*
+ * Runs FFmpeg 8.0.1's ffmpeg command line in this process, on the calling thread. The engine is
+ * libffmpegkitx_cli (FFmpeg's fftools, LGPL-2.1+), loaded on the first call.
+ *
+ * - One command at a time per process, because ffmpeg keeps its state in globals. A call waits while
+ *   another command runs; cancelling its task ends the wait. Operations (trim, split, probe) do not wait.
+ * - ffmpeg opens and writes its outputs itself, unlike the operations:
+ *   - there is no temporary file;
+ *   - a failed or cancelled command may leave partial outputs;
+ *   - an existing output fails with FFKX_ERROR_OUTPUT_EXISTS, unless -y overwrites it. Only the main
+ *     output file is checked: files that muxers such as image2 patterns, segment, hls, dash or tee
+ *     write, and files of -sdp_file, -vstats_file, -passlogfile or -progress, are overwritten;
+ *   - paths are what ffmpeg accepts (files, protocols such as fd:), not content Uris.
+ * - Refused with FFKX_ERROR_INVALID_ARGUMENT before anything runs: options that would change the whole
+ *   process or print help and exit. These are -report, -cpuflags, -cpucount, -max_alloc, -timelimit and
+ *   -stdin, and
+ *   -h, -version, -buildconf, -formats and the other listings. The FFREPORT environment variable is
+ *   ignored. There is no stdin and no signal handling.
+ * - Logs:
+ *   - -loglevel and -v set FFmpeg's global level only while the command runs.
+ *   - The task's log keeps lines by its own level, from the calling thread and from ffmpeg's worker
+ *     threads. Lines from threads inside codecs and filters are engine logs.
+ * - Cancelling the task stops ffmpeg within about 100 ms, as 'q' would: inputs stop being read and the
+ *   outputs written so far are finished properly. If finishing them stalls (an output that blocks),
+ *   their I/O is interrupted 3 s later. A read blocked inside the kernel (a stalled pipe or provider
+ *   behind fd:) ends only when it returns.
+ * - Progress: processed_us is the output time written, bytes_written the first output's size;
+ *   duration_us stays unknown.
+ * - Status:
+ *   - FFKX_OK when ffmpeg returns 0.
+ *   - A negative return is an FFmpeg error code, classified as for operations with side FFKX_SIDE_NONE;
+ *     ffkx_error.ffmpeg_error has the code. Commands do not tell inputs from outputs: a missing output
+ *     directory (ENOENT) also reads as FFKX_ERROR_INPUT_NOT_FOUND.
+ *   - Any other return (1, 69, 255) is FFKX_ERROR_FFMPEG, with the code in the message.
+ *   - FFKX_ERROR_INTERNAL if libffmpegkitx_cli cannot be loaded.
+ */
+FFKX_API ffkx_status ffkx_execute(const ffkx_execute_options* options, ffkx_task* task, ffkx_error* error);
 
 #ifdef __cplusplus
 }

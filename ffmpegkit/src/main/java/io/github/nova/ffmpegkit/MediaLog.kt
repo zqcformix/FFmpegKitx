@@ -128,5 +128,8 @@ internal class Redactions {
     companion object {
         const val INPUT = "<input>"
         const val OUTPUT = "<output>"
+
+        /** A whole path argument of [FFmpeg.execute]. */
+        const val PATH = "<path>"
     }
 }

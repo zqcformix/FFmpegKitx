@@ -33,6 +33,16 @@ internal class NativeRemuxStatus(
             else -> FFmpegException(NativeStatus.reasonOf(status), "$text: $subject", ffmpegError.takeIf { it != 0 })
         }
     }
+
+    /** The exception for a failed command ([FFmpeg.execute]): its message already says what failed. */
+    fun toCommandException(): Exception {
+        val text = String(message, Charsets.UTF_8)
+        return when (status) {
+            NativeStatus.INVALID_ARGUMENT -> IllegalArgumentException(text)
+            NativeStatus.CANCELLED -> CancellationException(text)
+            else -> FFmpegException(NativeStatus.reasonOf(status), text, ffmpegError.takeIf { it != 0 })
+        }
+    }
 }
 
 /**

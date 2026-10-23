@@ -5,6 +5,7 @@ import kotlin.coroutines.cancellation.CancellationException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -64,6 +65,31 @@ class NativeRemuxStatusTest {
         assertEquals("segment duration too short for in.mp4: more than 9999 segments of 1000 us", segments.message)
         assertTrue(status(NativeStatus.INVALID_ARGUMENT).toException("in.mp4", "out.mp4") is IllegalArgumentException)
         assertTrue(status(NativeStatus.CANCELLED, side = NativeStatus.SIDE_NONE).toException("in.mp4", "out.mp4") is CancellationException)
+    }
+
+    @Test
+    fun commandFailuresKeepTheirMessage() {
+        val missing = status(NativeStatus.INPUT_NOT_FOUND, code = -2, side = NativeStatus.SIDE_NONE,
+            message = "ffmpeg failed: No such file or directory (-2)").toCommandException() as FFmpegException
+        assertEquals(Reason.INPUT_NOT_FOUND, missing.reason)
+        assertEquals("ffmpeg failed: No such file or directory (-2)", missing.message)
+        assertEquals(-2, missing.nativeErrorCode)
+
+        val exitCode = status(NativeStatus.FFMPEG, side = NativeStatus.SIDE_NONE, message = "ffmpeg exited with code 1")
+            .toCommandException() as FFmpegException
+        assertEquals(Reason.NATIVE, exitCode.reason)
+        assertNull(exitCode.nativeErrorCode)
+
+        val refused = status(NativeStatus.INVALID_ARGUMENT, message = "option -report is not available").toCommandException()
+        assertTrue(refused is IllegalArgumentException)
+        assertEquals("option -report is not available", refused.message)
+        assertTrue(status(NativeStatus.CANCELLED).toCommandException() is CancellationException)
+    }
+
+    @Test
+    fun commandArgumentsCannotHoldNul() {
+        CommandLine.validate(listOf("-i", "in.mp4", "out.mp4", ""))
+        assertThrows(IllegalArgumentException::class.java) { CommandLine.validate(listOf("-i", "in\u0000.mp4")) }
     }
 
     @Test

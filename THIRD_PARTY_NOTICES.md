@@ -7,11 +7,13 @@ FFmpegKitx must meet the terms of the licenses below as well.
 The AAR contains, for each ABI (`arm64-v8a`, `armeabi-v7a`, `x86_64`), the
 shared libraries `libavcodec.so`, `libavformat.so`, `libavfilter.so`,
 `libavutil.so`, `libswresample.so` and `libswscale.so`. libass, FreeType,
-FriBidi and HarfBuzz are statically linked into them.
+FriBidi and HarfBuzz are statically linked into them. `libffmpegkitx_cli.so`
+is built from FFmpeg's fftools (see below).
 
 | Component | Version | License | Full text |
 | --- | --- | --- | --- |
 | FFmpeg | 8.0.1 | LGPL-2.1-or-later | [licenses/LGPL-2.1.txt](licenses/LGPL-2.1.txt), [licenses/FFmpeg-LICENSE.md](licenses/FFmpeg-LICENSE.md) |
+| FFmpeg fftools (the `ffmpeg` command line), modified | 8.0.1 | LGPL-2.1-or-later | [licenses/LGPL-2.1.txt](licenses/LGPL-2.1.txt) |
 | libass | 0.17.3 | ISC | [licenses/libass-ISC.txt](licenses/libass-ISC.txt) |
 | FreeType | not recorded | FreeType License (FTL), chosen over GPLv2 | [licenses/FreeType-FTL.txt](licenses/FreeType-FTL.txt) |
 | FriBidi | 1.0.16 | LGPL-2.1-or-later | [licenses/LGPL-2.1.txt](licenses/LGPL-2.1.txt) |
@@ -53,6 +55,19 @@ API 24:
 
 The exact flags of each shipped binary can be read at run time with
 `FFmpegKit.getBuildConfiguration()`.
+
+### fftools (`libffmpegkitx_cli.so`)
+
+The AAR also contains `libffmpegkitx_cli.so`, which runs FFmpeg's `ffmpeg`
+command line inside the app (`FFmpeg.execute`). It is built from FFmpeg
+8.0.1's `fftools` sources (LGPL-2.1-or-later), modified to run as a library.
+Each modified file states so and every change is marked `FFKX`. The library,
+including FFmpegKitx's own files built into it, is licensed under the
+LGPL-2.1-or-later. Its complete corresponding source, with the list of
+changes, is in this repository under
+[`ffmpegkit/src/main/cpp/fftools/`](ffmpegkit/src/main/cpp/fftools/README.md).
+The rest of FFmpegKitx loads it at run time and does not link it, so it can
+be replaced or left out.
 
 ## libass
 

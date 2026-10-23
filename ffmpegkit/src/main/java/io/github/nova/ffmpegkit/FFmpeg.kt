@@ -12,7 +12,7 @@ import kotlin.time.Duration
  * published. Failures throw [FFmpegException]; invalid arguments throw [IllegalArgumentException]
  * before any work starts.
  *
- * Trim and split take an optional `onProgress` callback; see [MediaProgress]. It runs on an IO
+ * Trim, split and [execute] take an optional `onProgress` callback; see [MediaProgress]. It runs on an IO
  * worker thread, never concurrently with itself and never after the call returned, so it may update
  * a `StateFlow` but not views. An exception it throws stops the work and is rethrown by the call.
  *
@@ -74,6 +74,58 @@ object FFmpeg {
         workerThreadObserver?.invoke(Thread.currentThread())
         Prober.probe(input, task)
     }
+
+    /**
+     * Runs an ffmpeg command line: FFmpeg 8.0.1's `ffmpeg` tool, inside this process. Each of
+     * [arguments] is one argument, given as is, never split or unquoted by a shell, so paths need no
+     * quoting:
+     *
+     * ```kotlin
+     * FFmpeg.execute(listOf("-i", input.path, "-vf", "scale=640:-2", "-c:a", "copy", output.path))
+     * ```
+     *
+     * Commands are a lower level than [trim], [split] and [probe], with these differences:
+     * - ffmpeg writes the outputs itself. There is no temporary file, so a failed or cancelled command
+     *   may leave partial outputs behind. An existing output fails with
+     *   [FFmpegException.Reason.OUTPUT_EXISTS] unless the arguments include `-y`, which overwrites it.
+     *   Only the main output file is checked: files written by muxers such as image2 patterns, segment,
+     *   hls, dash or tee, and by `-sdp_file`, `-vstats_file`, `-passlogfile` or `-progress`, are overwritten.
+     * - Arguments name files (or ffmpeg protocols), not `content://` Uris. To read a Uri, open a
+     *   `ParcelFileDescriptor`, keep it open during the call and pass `-fd`, its `fd`, `-i`, `fd:`.
+     * - One command runs at a time in the process; a call waits while another runs, and can be
+     *   cancelled while it waits. Commands count against [limits] like other operations.
+     * - Options that would change the whole process or print help are refused with
+     *   [IllegalArgumentException] before anything runs: `-report`, `-cpuflags`, `-cpucount`,
+     *   `-max_alloc`, `-timelimit`, `-stdin`, `-h`, `-version`, `-buildconf`, `-formats` and the other listings.
+     *   There is no stdin.
+     * - Cancelling the calling coroutine stops ffmpeg within about 100 ms, as its `q` key would: inputs
+     *   stop being read, and the outputs written so far are finished properly and kept (if finishing
+     *   stalls, it is interrupted after 3 s). A read blocked in the kernel, such as from a stalled
+     *   provider behind `fd:`, delays this until it returns.
+     * - Failures: an FFmpeg error ffmpeg returns becomes an [FFmpegException] with its reason (for
+     *   example [FFmpegException.Reason.INPUT_NOT_FOUND], which a missing output directory also gives:
+     *   commands do not tell inputs from outputs); any other non-zero exit code is
+     *   [FFmpegException.Reason.NATIVE]. The exception's [FFmpegException.log] holds what ffmpeg logged.
+     * - The log ([ExecuteResult.log]) follows [logOptions], not `-loglevel`. Arguments that are paths
+     *   read as `<path>` when paths are redacted.
+     */
+    suspend fun execute(arguments: List<String>): ExecuteResult = execute(arguments, null)
+
+    /**
+     * [execute] reporting progress to [onProgress]: [MediaProgress.processed] is the output time
+     * written, [MediaProgress.bytesWritten] the first output's size. The total is not known, so
+     * [MediaProgress.fraction] stays null until the command ends.
+     */
+    suspend fun execute(arguments: List<String>, onProgress: ((MediaProgress) -> Unit)?): ExecuteResult {
+        CommandLine.validate(arguments)
+        return runNative("execute", onProgress?.let { ProgressReporter(ProgressTimeline.UNKNOWN, false, it) }) { task ->
+            workerThreadObserver?.invoke(Thread.currentThread())
+            CommandLine.execute(arguments, task)
+        }
+    }
+
+    /** [execute] with the arguments listed: `FFmpeg.execute("-i", input.path, output.path)`. */
+    suspend fun execute(vararg arguments: String): ExecuteResult = execute(arguments.asList())
 
     /**
      * How operations started from now on capture FFmpeg's log; see [MediaLog]. By default warnings
@@ -251,6 +303,14 @@ class SplitResult internal constructor(
     val log: MediaLog = MediaLog.EMPTY,
 ) {
     override fun toString(): String = "SplitResult($segments)"
+}
+
+/** Result of [FFmpeg.execute]: ffmpeg exited with code 0. */
+class ExecuteResult internal constructor(
+    /** What ffmpeg logged, its worker threads included; see [MediaLog]. */
+    val log: MediaLog = MediaLog.EMPTY,
+) {
+    override fun toString(): String = "ExecuteResult(${log.entries.size} log entries)"
 }
 
 /**
